@@ -1,0 +1,14 @@
+﻿node_modules/
+dist/
+__pycache__/
+*.pyc
+.venv/
+backend/data/
+backend/autoscape.db
+backend/autoscape.db-wal
+backend/autoscape.db-shm
+backend/.runtime-port
+.env
+.env.local
+backend/.env.local
+secrets/
