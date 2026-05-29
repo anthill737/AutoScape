@@ -12,3 +12,10 @@ backend/.runtime-port
 .env.local
 backend/.env.local
 secrets/
+
+# stray/scratch
+${APPDATA}/
+*.log
+autoscape-trace*.txt
+frontend/tests.err
+frontend/tests.out
