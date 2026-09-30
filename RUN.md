@@ -105,6 +105,25 @@ Missing keys cause a clear error in the UI when that feature is used; the server
 without them. The absence of `backend\.env.local` is not an error when the corresponding key
 file exists in `secrets\`.
 
+### Outdoor and interior projects
+
+Each project has a space type chosen when it is created:
+
+- **Outdoor & Landscape**: yards, decks, patios, pools, gardens. Sizes are lot and house
+  square footage; retailers are Home Depot, Lowe's, Menards, Ace Hardware and Costco.
+- **Interior**: pick the room (Kitchen, Bathroom, Living Room, Bedroom, Home Office,
+  Basement, Laundry / Mudroom, Dining Room) and enter its length, width and ceiling height.
+  Feature categories become cabinets, countertops, flooring, paint, tile, lighting, plumbing
+  fixtures, built-ins, furniture layout and window treatments; styles include Scandinavian,
+  Mid-century, Farmhouse, Industrial, Japandi and Coastal; retailers add IKEA, Floor & Decor,
+  Build.com and Wayfair.
+
+The space type drives the render prompt (keep walls, windows and doors vs. keep the house and
+yard boundaries), the build-sheet role and rules (waste factors, licensed-trade flags for
+interiors), the product-research query and domain allowlist, and which measurements the
+Build Sheet panel asks for. Configs live in `backend/app/domain/spaces.py` and are served by
+`GET /api/spaces`; the frontend mirrors them in `frontend/src/api/spaces.ts` as a fallback.
+
 ### Choosing models
 
 Every request lets you pick the exact vendor model, not just the vendor:
@@ -199,7 +218,7 @@ App available at `http://localhost:5173`
 
 1. Open `http://localhost:5173` in your browser.
 2. Confirm the Projects list page loads with an empty state (no Projects yet).
-3. Click **New Project**, fill in an address plus lot and house square footage, upload a Site Photo, and submit — the new Project should appear in the list.
+3. Click **New Project**, choose Outdoor or Interior, fill in the address and sizes (lot and house square footage, or room dimensions), upload a photo, and submit — the new Project should appear in the list.
 4. Open the Project, click **New Design Request**, choose any Feature Categories, Style, Quality Tier, Image Provider, and Image model, then click **Generate Renders**. A successful request shows 3 renders; if a Design Request errors, the UI shows the structured backend `detail` message naming the cause, such as an image-provider quota or API-key problem, instead of an opaque `Request failed: 500`. The backend logs the full traceback with a short `trace_id` when an unexpected route exception occurs.
 
 If the page doesn't load, check that both terminals show no errors and that ports 8000 and 5173 are not already in use.

@@ -6,6 +6,7 @@ from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
 
+from app.domain.spaces import SpaceConfig
 from app.providers.base import MissingApiKeyError, ProviderAdapter, missing_api_key_message
 from app.providers.exceptions import ImageProviderAuthError, ImageProviderQuotaError
 from app.providers.image_prompt import enhance_landscape_render_prompt
@@ -31,7 +32,9 @@ class GeminiFlashImageAdapter(ProviderAdapter):
     def __init__(self, model: str | None = None) -> None:
         self.model = model or _GEMINI_MODEL
 
-    async def generate(self, image_b64: str, prompt: str) -> list[bytes]:
+    async def generate(
+        self, image_b64: str, prompt: str, space: SpaceConfig | None = None
+    ) -> list[bytes]:
         api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
             raise MissingApiKeyError(
@@ -41,7 +44,7 @@ class GeminiFlashImageAdapter(ProviderAdapter):
         image_bytes = base64.b64decode(image_b64)
         mime_type = _image_mime_type(image_bytes)
         client = genai.Client(api_key=api_key)
-        enhanced_prompt = enhance_landscape_render_prompt(prompt)
+        enhanced_prompt = enhance_landscape_render_prompt(prompt, space)
 
         tasks = [
             self._generate_one(client, image_bytes, mime_type, enhanced_prompt)

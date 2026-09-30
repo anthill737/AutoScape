@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.domain.spaces import get_space
 from app.providers import dimension_defaults as dd
 from app.providers.base import MissingApiKeyError
 from app.providers.materials_llm import MaterialsLLM
@@ -41,6 +42,65 @@ def test_build_dimension_message_lists_expected_keys():
     text = dd.build_dimension_message(["Deck", "Pool"], 5000.0, None)
     assert "deck_width_ft" in text and "pool_depth_ft" in text
     assert "House size: unknown" in text
+    assert "Lot size: 5000.0 sqft" in text
+    assert "residential yard" in text
+    # Exterior is the default space.
+    assert text == dd.build_dimension_message(["Deck", "Pool"], 5000.0, None, get_space("exterior"))
+
+
+def test_build_dimension_message_interior_lists_interior_keys_and_room_size():
+    text = dd.build_dimension_message(
+        ["Cabinets", "Flooring", "Lighting"],
+        None,
+        None,
+        space=get_space("interior"),
+        space_details={"room_length_ft": 14, "room_width_ft": 12},
+    )
+    assert (
+        "Return these keys: cabinet_linear_ft, upper_cabinet_linear_ft, floor_sqft, fixture_count"
+        in text
+    )
+    assert "Room length: 14 ft" in text
+    assert "Room width: 12 ft" in text
+    assert "Ceiling height: unknown" in text
+    assert "interior room" in text
+    assert "Lot size" not in text and "House size" not in text
+    assert "deck_width_ft" not in text
+
+
+def test_build_dimension_message_interior_without_categories():
+    text = dd.build_dimension_message([], None, None, space=get_space("interior"))
+    assert "Feature Categories: General remodel" in text
+    assert "your choice of snake_case *_ft keys" in text
+
+
+@pytest.mark.asyncio
+async def test_suggest_forwards_space_and_details_to_the_adapter(monkeypatch):
+    _only(monkeypatch, "ANTHROPIC_API_KEY")
+    seen: dict = {}
+
+    class FakeAdapter:
+        def __init__(self, model=None):
+            pass
+
+        async def suggest_dimension_defaults(self, **kwargs):
+            seen.update(kwargs)
+            return {"floor_sqft": "168"}
+
+    interior = get_space("interior")
+    with patch.object(MaterialsLLM, "make_adapter", lambda self, model=None: FakeAdapter(model)):
+        result = await dd.suggest_dimension_defaults(
+            _PNG,
+            ["Flooring"],
+            None,
+            None,
+            space=interior,
+            space_details={"room_length_ft": 14, "room_width_ft": 12},
+        )
+
+    assert result == {"floor_sqft": "168"}
+    assert seen["space"] is interior
+    assert seen["space_details"] == {"room_length_ft": 14, "room_width_ft": 12}
 
 
 def test_parse_dimension_json_strips_fences_and_normalises_values():

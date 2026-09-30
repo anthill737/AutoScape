@@ -3,25 +3,22 @@
 Kept in one place so the three vendors produce the same shape and so structured-output
 schemas (Anthropic ``output_config``, OpenAI ``json_schema``, Gemini ``response_schema``)
 stay in sync with the prose description in the system prompt.
+
+The system prompt is built per space (see ``app.domain.spaces``): the role, the approved
+retailer list and any extra rules come from the project's ``SpaceConfig``. ``SYSTEM_PROMPT``
+is the exterior prompt, kept for callers that import the constant.
 """
 
 from __future__ import annotations
 
 import json
 
-from app.domain.retailers import APPROVED_RETAILER_PROMPT_CONSTRAINT
+from app.domain.retailers import retailer_prompt_constraint
+from app.domain.spaces import SpaceConfig, get_space
 
 # Product links are rebuilt server-side as retailer search URLs (see
 # app.domain.build_sheet_validation), so the model is told NOT to invent them.
-SYSTEM_PROMPT = (
-    """You are a professional landscape contractor and cost estimator.
-Given a rendered design image, project dimensions, quality tier, feature categories,
-and product research data, generate a comprehensive build sheet.
-
-"""
-    + APPROVED_RETAILER_PROMPT_CONSTRAINT
-    + """
-
+_SCHEMA_INSTRUCTIONS = """\
 Respond with ONLY valid JSON (no markdown, no explanation) matching this exact schema.
 Keep it concise but complete: include 6-10 material items, 6-10 build steps, and 3-6
 concrete assumptions. Leave "product_url" as an empty string; working retailer links are
@@ -52,7 +49,25 @@ added automatically from the item name and vendor.
   "skill_level": "string (Beginner | Intermediate | Advanced)",
   "assumptions": ["string (include at least 3 concrete assumptions)"]
 }"""
-)
+
+
+def system_prompt_for(space: SpaceConfig | None = None) -> str:
+    """Build Sheet system prompt for a space (``None`` = exterior)."""
+    space = space or get_space(None)
+    rules = retailer_prompt_constraint(space.retailers)
+    if space.build_sheet_extra_rules:
+        rules = f"{rules}\n{space.build_sheet_extra_rules}"
+    return (
+        f"You are a {space.build_sheet_role}.\n"
+        "Given a rendered design image, project dimensions, quality tier, feature categories,\n"
+        "and product research data, generate a comprehensive build sheet.\n\n"
+        f"{rules}\n\n"
+        f"{_SCHEMA_INSTRUCTIONS}"
+    )
+
+
+# Exterior prompt, kept for adapters/tests that import the constant.
+SYSTEM_PROMPT = system_prompt_for(get_space("exterior"))
 
 # Strict schema: every object lists all properties as required and forbids extras, which
 # is what OpenAI strict mode and Anthropic structured outputs both expect.
@@ -122,11 +137,16 @@ def build_user_message(
     quality_tier: str,
     search_results: list[dict],
     feature_categories: list[str],
+    space: SpaceConfig | None = None,
+    room_type: str | None = None,
 ) -> str:
-    features_str = ", ".join(feature_categories) if feature_categories else "General landscaping"
+    space = space or get_space(None)
+    general = "General landscaping" if space.id == "exterior" else "General remodel"
+    features_str = ", ".join(feature_categories) if feature_categories else general
     dims_str = json.dumps(dimensions, indent=2) if dimensions else "{}"
     search_str = json.dumps(search_results[:25], indent=2) if search_results else "[]"
     return (
+        f"Space: {space.room_label(room_type)}\n"
         f"Feature Categories: {features_str}\n"
         f"Quality Tier: {quality_tier}\n"
         f"Project Dimensions:\n{dims_str}\n\n"

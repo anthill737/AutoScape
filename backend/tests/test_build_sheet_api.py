@@ -13,6 +13,7 @@ from app.database import get_db
 from app.domain.retailers import APPROVED_RETAILERS
 from app.main import app, get_data_dir
 from app.models import Base, DesignRequest, Project, Render
+from app.providers.build_sheet_schema import system_prompt_for
 
 _FAKE_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
 _HOME_DEPOT = APPROVED_RETAILERS[0]
@@ -357,7 +358,7 @@ class TestCreateBuildSheet:
             adapter.generate_build_sheet = AsyncMock(return_value=_MOCK_BUILD_SHEET)
             return adapter
 
-        def fake_grounding(model=None):
+        def fake_grounding(model=None, **kwargs):
             seen["grounding_model"] = model
             grounding = MagicMock()
             grounding.search = AsyncMock(return_value=_MOCK_SEARCH_RESULTS)
@@ -557,3 +558,184 @@ class TestGetBuildSheet:
 
         resp = c.get(f"/api/renders/{render_id}/build-sheet")
         assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Interior projects: space-aware prompts, retailers and search links
+# ---------------------------------------------------------------------------
+
+
+_INTERIOR_DETAILS = {"room_length_ft": 14.0, "room_width_ft": 12.0, "ceiling_height_ft": 9.0}
+
+_MOCK_INTERIOR_BUILD_SHEET = {
+    **_MOCK_BUILD_SHEET,
+    "material_items": [
+        {
+            **_MOCK_BUILD_SHEET["material_items"][0],
+            "name": "SEKTION base cabinet frame",
+            "vendor": "IKEA",
+            "product_url": "",
+        },
+        {
+            **_MOCK_BUILD_SHEET["material_items"][0],
+            "name": "Porcelain floor tile",
+            "vendor": "Floor & Decor",
+            "product_url": "",
+        },
+        {
+            **_MOCK_BUILD_SHEET["material_items"][0],
+            "name": "Pendant light",
+            "vendor": "Wayfair",
+            "product_url": "https://www.wayfair.com/lighting/pdp/pendant-1.html",
+        },
+    ],
+}
+
+
+@pytest.fixture
+def interior_setup(tmp_path):
+    """A Kitchen (interior) Project with a DesignRequest and Render seeded directly."""
+    db_path = tmp_path / "test.db"
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+
+    image_dir = tmp_path / "data" / "images" / "1"
+    image_dir.mkdir(parents=True)
+    image_path = image_dir / "render_1.png"
+    image_path.write_bytes(_FAKE_PNG)
+
+    with SessionLocal() as db:
+        project = Project(
+            address="9 Kitchen Ct",
+            space_type="interior",
+            room_type="Kitchen",
+            space_details=_INTERIOR_DETAILS,
+            site_photo_path=str(image_dir / "site_photo.jpg"),
+        )
+        db.add(project)
+        db.flush()
+
+        dr = DesignRequest(
+            project_id=project.id,
+            image_provider="gemini_flash_image",
+            feature_categories=["Cabinets", "Flooring"],
+            style="Japandi",
+            quality_tier="Mid-range",
+            composed_prompt="Redesign this kitchen",
+        )
+        db.add(dr)
+        db.flush()
+
+        render = Render(design_request_id=dr.id, image_path=str(image_path), is_chosen=True)
+        db.add(render)
+        db.commit()
+        db.refresh(render)
+        render_id = render.id
+
+    def override_get_db() -> Generator:
+        db = SessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    def override_get_data_dir() -> pathlib.Path:
+        return tmp_path / "data"
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_data_dir] = override_get_data_dir
+
+    with TestClient(app) as c:
+        yield c, render_id
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+class TestInteriorBuildSheet:
+    def test_interior_project_uses_interior_retailers_prompt_and_search(
+        self, interior_setup, monkeypatch
+    ):
+        c, render_id = interior_setup
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("PERPLEXITY_API_KEY", "px-test")
+        seen: dict = {}
+
+        def fake_make_adapter(self, model=None):
+            adapter = MagicMock()
+
+            async def generate_build_sheet(**kwargs):
+                seen["build_sheet_kwargs"] = kwargs
+                return _MOCK_INTERIOR_BUILD_SHEET
+
+            adapter.generate_build_sheet = generate_build_sheet
+            return adapter
+
+        def fake_grounding(model=None, **kwargs):
+            seen["grounding_kwargs"] = kwargs
+            grounding = MagicMock()
+            grounding.search = AsyncMock(return_value=_MOCK_SEARCH_RESULTS)
+            return grounding
+
+        with patch("app.main.MaterialsLLM.make_adapter", fake_make_adapter):
+            with patch("app.main.SearchGrounding", side_effect=fake_grounding):
+                resp = c.post(f"/api/renders/{render_id}/build-sheet", json=_VALID_POST_BODY)
+
+        assert resp.status_code == 201, resp.text
+
+        # The materials adapter received the interior space; its system prompt is the
+        # interior designer prompt with the interior retailer allowlist.
+        space = seen["build_sheet_kwargs"]["space"]
+        assert space.id == "interior"
+        prompt = system_prompt_for(space)
+        assert "interior designer" in prompt
+        assert "IKEA (ikea.com)" in prompt
+        assert "landscape contractor" not in prompt
+
+        # Search grounding was built for the project's space and room.
+        assert seen["grounding_kwargs"]["space"].id == "interior"
+        assert seen["grounding_kwargs"]["room_type"] == "Kitchen"
+
+        # Every item got a search link on an interior retailer; IKEA's is IKEA's own.
+        items = resp.json()["material_items"]
+        urls = {item["name"]: item["product_url"] for item in items}
+        assert urls["SEKTION base cabinet frame"] == (
+            "https://www.ikea.com/us/en/search/?q=SEKTION+base+cabinet+frame"
+        )
+        assert urls["Porcelain floor tile"] == (
+            "https://www.flooranddecor.com/search?q=Porcelain+floor+tile"
+        )
+        assert urls["Pendant light"] == "https://www.wayfair.com/keyword.php?keyword=Pendant+light"
+
+    def test_exterior_project_still_passes_exterior_space(self, setup, monkeypatch):
+        c, render_id = setup
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("PERPLEXITY_API_KEY", "px-test")
+
+        mock_adapter = MagicMock()
+        mock_adapter.generate_build_sheet = AsyncMock(return_value=_MOCK_BUILD_SHEET)
+        with patch("app.main.SearchGrounding.search", new=AsyncMock(return_value=[])):
+            with patch("app.main.MaterialsLLM.make_adapter", return_value=mock_adapter):
+                resp = c.post(f"/api/renders/{render_id}/build-sheet", json=_VALID_POST_BODY)
+
+        assert resp.status_code == 201
+        space = mock_adapter.generate_build_sheet.await_args.kwargs["space"]
+        assert space.id == "exterior"
+        assert "professional landscape contractor" in system_prompt_for(space)
+
+    def test_interior_dimension_defaults_pass_space_and_room_size(self, interior_setup):
+        c, render_id = interior_setup
+        with patch(
+            "app.main.suggest_dimension_defaults",
+            new=AsyncMock(return_value={"cabinet_linear_ft": "18", "floor_sqft": "168"}),
+        ) as mock_suggest:
+            resp = c.post(f"/api/renders/{render_id}/dimension-defaults", json={})
+
+        assert resp.status_code == 200
+        assert resp.json() == {"cabinet_linear_ft": "18", "floor_sqft": "168"}
+        kwargs = mock_suggest.await_args.kwargs
+        assert kwargs["feature_categories"] == ["Cabinets", "Flooring"]
+        assert kwargs["space"].id == "interior"
+        assert kwargs["space_details"] == _INTERIOR_DETAILS
+        assert kwargs["lot_size_sqft"] is None

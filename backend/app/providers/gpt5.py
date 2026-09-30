@@ -4,12 +4,14 @@ import os
 
 from openai import AsyncOpenAI
 
+from app.domain.spaces import SpaceConfig
 from app.providers.base import MaterialsAdapter, MissingApiKeyError, missing_api_key_message
 from app.providers.build_sheet_schema import (
     BUILD_SHEET_SCHEMA,
     SYSTEM_PROMPT,
     build_user_message,
     image_media_type,
+    system_prompt_for,
 )
 from app.providers.dimension_defaults import (
     DIMENSION_SYSTEM_PROMPT,
@@ -62,6 +64,8 @@ class Gpt5Adapter(MaterialsAdapter):
         feature_categories: list[str],
         lot_size_sqft: float | None,
         house_sqft: float | None,
+        space: SpaceConfig | None = None,
+        space_details: dict | None = None,
     ) -> dict[str, str]:
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
@@ -87,7 +91,11 @@ class Gpt5Adapter(MaterialsAdapter):
                         {
                             "type": "text",
                             "text": build_dimension_message(
-                                feature_categories, lot_size_sqft, house_sqft
+                                feature_categories,
+                                lot_size_sqft,
+                                house_sqft,
+                                space=space,
+                                space_details=space_details,
                             ),
                         },
                     ],
@@ -105,6 +113,7 @@ class Gpt5Adapter(MaterialsAdapter):
         quality_tier: str,
         search_results: list[dict],
         feature_categories: list[str],
+        space: SpaceConfig | None = None,
     ) -> dict:
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
@@ -115,7 +124,7 @@ class Gpt5Adapter(MaterialsAdapter):
         image_b64 = base64.b64encode(render_image_bytes).decode()
         media_type = image_media_type(render_image_bytes)
         user_text = build_user_message(
-            dimensions, quality_tier, search_results, feature_categories
+            dimensions, quality_tier, search_results, feature_categories, space=space
         )
 
         client = AsyncOpenAI(api_key=api_key)
@@ -130,7 +139,7 @@ class Gpt5Adapter(MaterialsAdapter):
                 },
             },
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt_for(space)},
                 {
                     "role": "user",
                     "content": [

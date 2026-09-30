@@ -26,6 +26,12 @@ class Project(Base):
     address = Column(String, nullable=False)
     lot_size_sqft = Column(Float, nullable=True)
     house_sqft = Column(Float, nullable=True)
+    # "exterior" (yard/landscape) or "interior" (room); see app.domain.spaces.
+    space_type = Column(String, nullable=False, default="exterior", server_default="exterior")
+    # Interior only: which room the site photo shows (e.g. "Kitchen").
+    room_type = Column(String, nullable=True)
+    # Size inputs keyed by the space's size_fields, e.g. {"room_length_ft": 14, ...}.
+    space_details = Column(JSON, nullable=True)
     site_photo_path = Column(String, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 

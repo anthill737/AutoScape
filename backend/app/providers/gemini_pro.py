@@ -5,12 +5,14 @@ import os
 from google import genai
 from google.genai import types
 
+from app.domain.spaces import SpaceConfig
 from app.providers.base import MaterialsAdapter, MissingApiKeyError, missing_api_key_message
 from app.providers.build_sheet_schema import (
     SYSTEM_PROMPT,
     build_user_message,
     image_media_type,
     strip_code_fences,
+    system_prompt_for,
 )
 from app.providers.dimension_defaults import (
     DIMENSION_SYSTEM_PROMPT,
@@ -41,6 +43,8 @@ class GeminiProAdapter(MaterialsAdapter):
         feature_categories: list[str],
         lot_size_sqft: float | None,
         house_sqft: float | None,
+        space: SpaceConfig | None = None,
+        space_details: dict | None = None,
     ) -> dict[str, str]:
         api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
@@ -49,7 +53,9 @@ class GeminiProAdapter(MaterialsAdapter):
             )
 
         client = genai.Client(api_key=api_key)
-        user_text = build_dimension_message(feature_categories, lot_size_sqft, house_sqft)
+        user_text = build_dimension_message(
+            feature_categories, lot_size_sqft, house_sqft, space=space, space_details=space_details
+        )
         loop = asyncio.get_running_loop()
         raw = await loop.run_in_executor(
             None,
@@ -86,6 +92,7 @@ class GeminiProAdapter(MaterialsAdapter):
         quality_tier: str,
         search_results: list[dict],
         feature_categories: list[str],
+        space: SpaceConfig | None = None,
     ) -> dict:
         api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
@@ -94,26 +101,42 @@ class GeminiProAdapter(MaterialsAdapter):
             )
 
         user_text = build_user_message(
-            dimensions, quality_tier, search_results, feature_categories
+            dimensions, quality_tier, search_results, feature_categories, space=space
         )
 
         client = genai.Client(api_key=api_key)
-        response = await _call_gemini_pro(client, render_image_bytes, user_text, self.model)
+        response = await _call_gemini_pro(
+            client,
+            render_image_bytes,
+            user_text,
+            self.model,
+            system_prompt=system_prompt_for(space),
+        )
         return json.loads(strip_code_fences(response))
 
 
 async def _call_gemini_pro(
-    client: genai.Client, render_image_bytes: bytes, user_text: str, model: str = _MODEL
+    client: genai.Client,
+    render_image_bytes: bytes,
+    user_text: str,
+    model: str = _MODEL,
+    system_prompt: str = SYSTEM_PROMPT,
 ) -> str:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
-        lambda: _call_gemini_pro_sync(client, render_image_bytes, user_text, model),
+        lambda: _call_gemini_pro_sync(
+            client, render_image_bytes, user_text, model, system_prompt=system_prompt
+        ),
     )
 
 
 def _call_gemini_pro_sync(
-    client: genai.Client, render_image_bytes: bytes, user_text: str, model: str = _MODEL
+    client: genai.Client,
+    render_image_bytes: bytes,
+    user_text: str,
+    model: str = _MODEL,
+    system_prompt: str = SYSTEM_PROMPT,
 ) -> str:
     response = client.models.generate_content(
         model=model,
@@ -131,7 +154,7 @@ def _call_gemini_pro_sync(
             )
         ],
         config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
+            system_instruction=system_prompt,
             response_mime_type="application/json",
             max_output_tokens=_MAX_OUTPUT_TOKENS,
         ),

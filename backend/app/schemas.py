@@ -54,6 +54,11 @@ class DesignRequestCreate(BaseModel):
 class ProjectListItem(BaseModel):
     id: int
     address: str
+    space_type: str = "exterior"
+    room_type: Optional[str] = None
+    space_details: Optional[dict[str, Any]] = None
+    # "Outdoor & Landscape", or the room type (e.g. "Kitchen") for interior projects.
+    space_label: Optional[str] = None
     site_photo_url: Optional[str] = None
     site_photo_thumb_url: Optional[str] = None
     created_at: datetime
@@ -69,6 +74,10 @@ class ProjectListItem(BaseModel):
 class ProjectDetail(BaseModel):
     id: int
     address: str
+    space_type: str = "exterior"
+    room_type: Optional[str] = None
+    space_details: Optional[dict[str, Any]] = None
+    space_label: Optional[str] = None
     lot_size_sqft: Optional[float] = None
     house_sqft: Optional[float] = None
     site_photo_url: Optional[str] = None

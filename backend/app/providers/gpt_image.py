@@ -4,6 +4,7 @@ import os
 
 from openai import AsyncOpenAI
 
+from app.domain.spaces import SpaceConfig
 from app.providers.base import MissingApiKeyError, ProviderAdapter, missing_api_key_message
 from app.providers.image_prompt import enhance_landscape_render_prompt
 from app.providers.model_catalog import default_model_for
@@ -29,7 +30,9 @@ class GptImageAdapter(ProviderAdapter):
     def __init__(self, model: str | None = None) -> None:
         self.model = model or _GPT_IMAGE_MODEL
 
-    async def generate(self, image_b64: str, prompt: str) -> list[bytes]:
+    async def generate(
+        self, image_b64: str, prompt: str, space: SpaceConfig | None = None
+    ) -> list[bytes]:
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise MissingApiKeyError(
@@ -42,7 +45,7 @@ class GptImageAdapter(ProviderAdapter):
         response = await client.images.edit(
             model=self.model,
             image=_image_file_tuple(image_bytes),
-            prompt=enhance_landscape_render_prompt(prompt),
+            prompt=enhance_landscape_render_prompt(prompt, space),
             n=3,
             quality=_QUALITY,
         )

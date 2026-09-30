@@ -18,7 +18,8 @@ from urllib.parse import urlparse
 
 import httpx
 
-from app.domain.retailers import APPROVED_RETAILERS
+from app.domain.retailers import APPROVED_RETAILERS, approved_domains
+from app.domain.spaces import SpaceConfig, get_space
 from app.providers.base import MissingApiKeyError, missing_api_key_message
 from app.providers.model_catalog import default_model_for
 
@@ -32,17 +33,14 @@ _MAX_ATTEMPTS = 4
 _RETRY_BASE_SECONDS = 1.5
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
-_INSTRUCTIONS = (
-    "You are a landscaping materials researcher. Answer with a concise list of specific "
-    "products and materials, with product names and current prices where available. "
-    "Only use the retailer sites you are allowed to search."
-)
-_SEARCH_PROMPT = (
-    "List the best products and materials for a {category} landscaping project. "
-    "Include product names, sources, and current prices where available."
-)
-_APPROVED_RETAILER_DOMAINS = {retailer["domain"] for retailer in APPROVED_RETAILERS}
 # Agent API domain allowlist: bare hostnames, max 20 entries.
+_MAX_DOMAIN_FILTER = 20
+
+# Exterior defaults, kept for callers that import the constants. The per-space text and
+# domains come from SpaceConfig (app.domain.spaces).
+_INSTRUCTIONS = get_space("exterior").search_instructions
+_SEARCH_PROMPT = get_space("exterior").search_query_template
+_APPROVED_RETAILER_DOMAINS = approved_domains(APPROVED_RETAILERS)
 _SEARCH_DOMAIN_FILTER = [retailer["domain"] for retailer in APPROVED_RETAILERS]
 
 
@@ -68,8 +66,15 @@ class SearchGroundingError(Exception):
 class SearchGrounding:
     """Issues one Agent API search per material category and parses the sources."""
 
-    def __init__(self, model: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str | None = None,
+        space: SpaceConfig | None = None,
+        room_type: str | None = None,
+    ) -> None:
         self.model = model or _DEFAULT_MODEL
+        self.space = space or get_space(None)
+        self.room_type = room_type
 
     async def search(self, categories: list[str]) -> list[GroundingResult]:
         api_key = os.environ.get("PERPLEXITY_API_KEY")
@@ -94,12 +99,13 @@ class SearchGrounding:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        payload = build_payload(category, self.model)
+        payload = build_payload(category, self.model, space=self.space, room_type=self.room_type)
+        allowed = approved_domains(self.space.retailers)
 
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             response = await client.post(PERPLEXITY_AGENT_URL, headers=headers, json=payload)
             if response.status_code < 400:
-                return _parse_response(category, response.json())
+                return _parse_response(category, response.json(), allowed_domains=allowed)
 
             if response.status_code in _RETRYABLE_STATUSES and attempt < _MAX_ATTEMPTS:
                 await asyncio.sleep(_retry_delay(response, attempt))
@@ -141,28 +147,41 @@ def _vendor_message(response: httpx.Response) -> str:
     return response.reason_phrase or "no details"
 
 
-def build_payload(category: str, model: str = _DEFAULT_MODEL) -> dict:
+def build_payload(
+    category: str,
+    model: str = _DEFAULT_MODEL,
+    space: SpaceConfig | None = None,
+    room_type: str | None = None,
+) -> dict:
+    space = space or get_space(None)
     return {
         "model": model,
-        "instructions": _INSTRUCTIONS,
-        "input": _build_query(category),
+        "instructions": space.search_instructions,
+        "input": _build_query(category, space, room_type),
         # Required for anthropic/* models on the Agent API; harmless elsewhere.
         "max_output_tokens": _MAX_OUTPUT_TOKENS,
         "tools": [
             {
                 "type": "web_search",
                 "max_results": _MAX_RESULTS,
-                "filters": {"search_domain_filter": _SEARCH_DOMAIN_FILTER},
+                "filters": {
+                    "search_domain_filter": space.retailer_domains()[:_MAX_DOMAIN_FILTER]
+                },
             }
         ],
     }
 
 
-def _build_query(category: str) -> str:
-    return _SEARCH_PROMPT.format(category=category)
+def _build_query(
+    category: str, space: SpaceConfig | None = None, room_type: str | None = None
+) -> str:
+    return (space or get_space(None)).search_query(category, room_type)
 
 
-def _parse_response(category: str, data: dict) -> GroundingResult:
+def _parse_response(
+    category: str, data: dict, allowed_domains: set[str] | None = None
+) -> GroundingResult:
+    allowed = allowed_domains if allowed_domains is not None else _APPROVED_RETAILER_DOMAINS
     urls: list[str] = []
     text_parts: list[str] = []
 
@@ -173,7 +192,7 @@ def _parse_response(category: str, data: dict) -> GroundingResult:
         if item_type == "search_results":
             for result in item.get("results", []) or []:
                 url = result.get("url") if isinstance(result, dict) else None
-                if isinstance(url, str) and _is_approved_retailer_url(url):
+                if isinstance(url, str) and _is_approved_retailer_url(url, allowed):
                     urls.append(url.strip())
         elif item_type == "message":
             for part in item.get("content", []) or []:
@@ -188,7 +207,7 @@ def _parse_response(category: str, data: dict) -> GroundingResult:
                     if annotation.get("type") != "url_citation":
                         continue
                     url = annotation.get("url")
-                    if isinstance(url, str) and _is_approved_retailer_url(url):
+                    if isinstance(url, str) and _is_approved_retailer_url(url, allowed):
                         urls.append(url.strip())
 
     # De-duplicate while preserving order.
@@ -202,10 +221,11 @@ def _parse_response(category: str, data: dict) -> GroundingResult:
     return {"category": category, "urls": unique_urls, "snippets": snippets}
 
 
-def _is_approved_retailer_url(url: str) -> bool:
+def _is_approved_retailer_url(url: str, allowed_domains: set[str] | None = None) -> bool:
     host = urlparse(url.strip()).hostname
     if not host:
         return False
 
+    allowed = allowed_domains if allowed_domains is not None else _APPROVED_RETAILER_DOMAINS
     normalized_host = host.removeprefix("www.").lower()
-    return normalized_host in _APPROVED_RETAILER_DOMAINS
+    return normalized_host in allowed

@@ -470,7 +470,7 @@ class TestIterationDesignRequest:
         body = {**_VALID_BODY, "parent_render_id": parent_render_id}
         captured = {}
 
-        async def fake_generate(self, image_b64, prompt):
+        async def fake_generate(self, image_b64, prompt, **kwargs):
             import base64
 
             captured["image_bytes"] = base64.b64decode(image_b64)

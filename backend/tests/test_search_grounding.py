@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.domain.retailers import APPROVED_RETAILERS
+from app.domain.spaces import get_space
 from app.providers.base import MissingApiKeyError
 from app.providers.search_grounding import (
     PERPLEXITY_AGENT_URL,
@@ -171,6 +172,80 @@ def test_build_payload_honors_model_override():
     payload = build_payload("deck", model="anthropic/claude-sonnet-4-6")
     assert payload["model"] == "anthropic/claude-sonnet-4-6"
     assert SearchGrounding(model="openai/gpt-5.6-luna").model == "openai/gpt-5.6-luna"
+
+
+def test_build_payload_interior_uses_interior_domains_and_remodel_phrasing():
+    interior = get_space("interior")
+    payload = build_payload("Cabinets", space=interior, room_type="Kitchen")
+
+    assert payload["input"].startswith(
+        "List the best products and materials for a Cabinets kitchen remodel."
+    )
+    assert "landscaping" not in payload["input"]
+    assert "landscaping" not in payload["instructions"]
+    domains = payload["tools"][0]["filters"]["search_domain_filter"]
+    assert domains == [
+        "homedepot.com",
+        "lowes.com",
+        "ikea.com",
+        "flooranddecor.com",
+        "build.com",
+        "wayfair.com",
+    ]
+    assert len(domains) <= 20
+
+    # No room type falls back to a generic "room".
+    assert "Cabinets room remodel" in build_payload("Cabinets", space=interior)["input"]
+    # Default (no space) is the exterior behaviour.
+    assert build_payload("deck") == build_payload("deck", space=get_space("exterior"))
+
+
+def test_parse_response_filters_by_the_space_domains():
+    ikea_url = "https://www.ikea.com/us/en/p/sektion-123/"
+    data = _agent_response(
+        results=[
+            {"id": 1, "url": ikea_url},
+            {"id": 2, "url": f"https://www.{_HOME_DEPOT['domain']}/p/1"},
+            {"id": 3, "url": "https://www.menards.com/p/1"},
+        ],
+        text="IKEA and Home Depot carry these.",
+    )
+    interior_domains = set(get_space("interior").retailer_domains())
+
+    interior = _parse_response("Cabinets", data, allowed_domains=interior_domains)
+    assert interior["urls"] == [ikea_url, f"https://www.{_HOME_DEPOT['domain']}/p/1"]
+
+    exterior = _parse_response("Cabinets", data)
+    assert exterior["urls"] == [
+        f"https://www.{_HOME_DEPOT['domain']}/p/1",
+        "https://www.menards.com/p/1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_search_uses_the_instance_space_and_room_type(monkeypatch):
+    monkeypatch.setenv("PERPLEXITY_API_KEY", "test-key")
+    captured: list[dict] = []
+
+    async def fake_post(url, **kwargs):
+        captured.append(kwargs["json"])
+        return _make_mock_response(
+            _agent_response(
+                results=[{"id": 1, "url": "https://www.ikea.com/us/en/p/1/"}],
+                text="IKEA has it [1].",
+            )
+        )
+
+    ctx = _patched_client(AsyncMock(side_effect=fake_post))
+    try:
+        grounding = SearchGrounding(space=get_space("interior"), room_type="Bathroom")
+        results = await grounding.search(["Plumbing Fixtures"])
+    finally:
+        ctx.stop()
+
+    assert "Plumbing Fixtures bathroom remodel" in captured[0]["input"]
+    assert "ikea.com" in captured[0]["tools"][0]["filters"]["search_domain_filter"]
+    assert results[0]["urls"] == ["https://www.ikea.com/us/en/p/1/"]
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,8 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
+
+from app.domain.spaces import SpaceConfig
 
 
 class MissingApiKeyError(Exception):
@@ -17,13 +21,17 @@ class ProviderAdapter(ABC):
     """Contract every Image Provider adapter must satisfy."""
 
     @abstractmethod
-    async def generate(self, image_b64: str, prompt: str) -> list[bytes]:
+    async def generate(
+        self, image_b64: str, prompt: str, space: SpaceConfig | None = None
+    ) -> list[bytes]:
         """
         Generate exactly 3 image variations.
 
         Args:
             image_b64: Base64-encoded source image bytes (the Site Photo or prior Render).
             prompt: The Composed Prompt describing the desired design changes.
+            space: The project's space config, which selects the exterior or interior
+                   render guidance appended to the prompt. ``None`` means exterior.
 
         Returns:
             List of exactly 3 raw image bytes objects.
@@ -44,6 +52,7 @@ class MaterialsAdapter(ABC):
         quality_tier: str,
         search_results: list[dict],
         feature_categories: list[str],
+        space: SpaceConfig | None = None,
     ) -> dict:
         """
         Generate a structured Build Sheet from a Chosen Render and project context.
@@ -55,6 +64,8 @@ class MaterialsAdapter(ABC):
             search_results: Perplexity Search Grounding results, each a dict with
                             at minimum {"url": str, "snippet": str, "title": str}.
             feature_categories: List of Feature Category strings (e.g. ["Deck", "Garden Beds"]).
+            space: The project's space config (role, retailers and extra rules for the
+                   system prompt). ``None`` means exterior.
 
         Returns:
             Dict with keys: material_items (list), tool_list (list), build_steps (list),
@@ -70,6 +81,8 @@ class MaterialsAdapter(ABC):
         feature_categories: list[str],
         lot_size_sqft: float | None,
         house_sqft: float | None,
+        space: SpaceConfig | None = None,
+        space_details: dict | None = None,
     ) -> dict[str, str]:
         """Suggest starting dimensions ({field_key: numeric string}) from a render image."""
         raise NotImplementedError(f"{self.__class__.__name__} cannot suggest dimensions")

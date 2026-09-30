@@ -5,6 +5,7 @@ import os
 
 import anthropic
 
+from app.domain.spaces import SpaceConfig
 from app.providers.base import MaterialsAdapter, MissingApiKeyError, missing_api_key_message
 from app.providers.build_sheet_schema import (
     BUILD_SHEET_SCHEMA,
@@ -12,6 +13,7 @@ from app.providers.build_sheet_schema import (
     build_user_message,
     image_media_type,
     strip_code_fences,
+    system_prompt_for,
 )
 from app.providers.model_catalog import default_model_for
 
@@ -55,6 +57,8 @@ async def suggest_dimension_defaults(
     lot_size_sqft: float | None,
     house_sqft: float | None,
     model: str | None = None,
+    space: SpaceConfig | None = None,
+    space_details: dict | None = None,
 ) -> dict:
     """Return a dict of dimension field names -> numeric string defaults using Claude."""
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -65,7 +69,9 @@ async def suggest_dimension_defaults(
 
     image_b64 = base64.b64encode(render_image_bytes).decode()
     media_type = image_media_type(render_image_bytes)
-    user_text = _build_dimension_message(feature_categories, lot_size_sqft, house_sqft)
+    user_text = _build_dimension_message(
+        feature_categories, lot_size_sqft, house_sqft, space=space, space_details=space_details
+    )
 
     client = anthropic.Anthropic(api_key=api_key)
     loop = asyncio.get_running_loop()
@@ -109,9 +115,17 @@ class ClaudeSonnetAdapter(MaterialsAdapter):
         feature_categories: list[str],
         lot_size_sqft: float | None,
         house_sqft: float | None,
+        space: SpaceConfig | None = None,
+        space_details: dict | None = None,
     ) -> dict[str, str]:
         return await suggest_dimension_defaults(
-            render_image_bytes, feature_categories, lot_size_sqft, house_sqft, model=self.model
+            render_image_bytes,
+            feature_categories,
+            lot_size_sqft,
+            house_sqft,
+            model=self.model,
+            space=space,
+            space_details=space_details,
         )
 
     async def generate_build_sheet(
@@ -121,6 +135,7 @@ class ClaudeSonnetAdapter(MaterialsAdapter):
         quality_tier: str,
         search_results: list[dict],
         feature_categories: list[str],
+        space: SpaceConfig | None = None,
     ) -> dict:
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
@@ -133,11 +148,18 @@ class ClaudeSonnetAdapter(MaterialsAdapter):
         image_b64 = base64.b64encode(render_image_bytes).decode()
         media_type = image_media_type(render_image_bytes)
         user_text = build_user_message(
-            dimensions, quality_tier, search_results, feature_categories
+            dimensions, quality_tier, search_results, feature_categories, space=space
         )
 
         client = anthropic.Anthropic(api_key=api_key)
-        response = await _call_claude(client, image_b64, media_type, user_text, self.model)
+        response = await _call_claude(
+            client,
+            image_b64,
+            media_type,
+            user_text,
+            self.model,
+            system_prompt=system_prompt_for(space),
+        )
         if isinstance(response, dict):
             return response
         return json.loads(strip_code_fences(response))
@@ -149,11 +171,14 @@ async def _call_claude(
     media_type: str,
     user_text: str,
     model: str = _MODEL,
+    system_prompt: str = SYSTEM_PROMPT,
 ) -> dict | str:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
-        lambda: _call_claude_sync(client, image_b64, media_type, user_text, model),
+        lambda: _call_claude_sync(
+            client, image_b64, media_type, user_text, model, system_prompt=system_prompt
+        ),
     )
 
 
@@ -163,6 +188,7 @@ def _call_claude_sync(
     media_type: str,
     user_text: str,
     model: str = _MODEL,
+    system_prompt: str = SYSTEM_PROMPT,
 ) -> dict | str:
     # Structured outputs (output_config.format) guarantee schema-valid JSON in the first
     # text block. This replaces the old forced tool_choice, which current Claude models
@@ -170,7 +196,7 @@ def _call_claude_sync(
     message = client.messages.create(
         model=model,
         max_tokens=_MAX_BUILD_SHEET_TOKENS,
-        system=SYSTEM_PROMPT,
+        system=system_prompt,
         messages=[
             {
                 "role": "user",
