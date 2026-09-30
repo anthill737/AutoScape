@@ -2,7 +2,10 @@ from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-THUMBNAIL_MAX_EDGE = 256
+# Project cards render the thumbnail at roughly 530 CSS px wide (about 1060 device px on
+# a 2x display), so the long edge needs to be around 1000 px to look sharp. The size is
+# part of the filename, so raising it simply generates fresh files on next request.
+THUMBNAIL_MAX_EDGE = 1024
 
 
 def site_photo_thumbnail_path(
@@ -41,7 +44,7 @@ def ensure_site_photo_thumbnail(
             image = _jpeg_ready(image)
 
             thumb_path.parent.mkdir(parents=True, exist_ok=True)
-            image.save(thumb_path, format="JPEG", quality=85, optimize=True)
+            image.save(thumb_path, format="JPEG", quality=82, optimize=True, progressive=True)
     except (OSError, UnidentifiedImageError):
         return None
 

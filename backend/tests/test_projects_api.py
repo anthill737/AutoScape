@@ -15,7 +15,11 @@ from sqlalchemy.orm import sessionmaker
 from app.database import get_db
 from app.main import app, get_data_dir
 from app.models import Base, BuildSheet, DesignRequest, Render
-from app.thumbnails import ensure_site_photo_thumbnail, site_photo_thumbnail_path
+from app.thumbnails import (
+    THUMBNAIL_MAX_EDGE,
+    ensure_site_photo_thumbnail,
+    site_photo_thumbnail_path,
+)
 
 BACKEND_DIR = pathlib.Path(__file__).parent.parent
 
@@ -289,11 +293,11 @@ class TestListProjects:
         assert item["latest_quality_tier"] == "Premium"
 
         thumb_url = item["site_photo_thumb_url"]
-        assert thumb_url == f"/thumbnails/{project_id}_256.jpg"
-        thumb_path = tmp_path / "data" / "thumbnails" / f"{project_id}_256.jpg"
+        assert thumb_url == f"/thumbnails/{project_id}_{THUMBNAIL_MAX_EDGE}.jpg"
+        thumb_path = tmp_path / "data" / "thumbnails" / f"{project_id}_{THUMBNAIL_MAX_EDGE}.jpg"
         assert thumb_path.exists()
         with Image.open(thumb_path) as thumbnail:
-            assert max(thumbnail.size) <= 256
+            assert max(thumbnail.size) <= THUMBNAIL_MAX_EDGE
 
         thumb_resp = c.get(thumb_url)
         assert thumb_resp.status_code == 200
@@ -323,12 +327,12 @@ class TestSitePhotoThumbnail:
             data_dir=data_dir,
         )
 
-        assert url == "/thumbnails/42_256.jpg"
+        assert url == f"/thumbnails/42_{THUMBNAIL_MAX_EDGE}.jpg"
         thumbnail_path = site_photo_thumbnail_path(data_dir, 42)
         assert thumbnail_path.exists()
         with Image.open(thumbnail_path) as thumbnail:
             assert thumbnail.format == "JPEG"
-            assert max(thumbnail.size) <= 256
+            assert max(thumbnail.size) <= THUMBNAIL_MAX_EDGE
 
     def test_reuses_existing_cached_thumbnail(self, tmp_path):
         data_dir = tmp_path / "data"
