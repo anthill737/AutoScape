@@ -231,83 +231,17 @@ start /b "" cmd /c "cd /d backend && !UV_CMD! run uvicorn app.main:app --port !C
 echo  [AutoScape] Starting frontend on port 5173...
 start /b "" cmd /c "cd /d frontend && !PNPM_CMD! --config.verify-deps-before-run=false dev >> !FLOG_CHILD! 2>&1"
 
-echo.
-echo  Waiting for the backend and frontend to be ready...
-echo  Log output from both services appears below.
-echo  ^(Close this window at any time to stop backend and frontend.^)
-echo.
-
-:: ---- Poll until BOTH services respond, streaming logs meanwhile (max ~3 min) ----
-:: We wait for the backend /health endpoint first. The backend only begins
-:: accepting connections after its startup work (DB migrations, etc.) completes,
-:: so a successful response means the API is genuinely ready to serve requests.
-:: Only once the backend is healthy AND the frontend responds do we open the
-:: browser -- this is what prevents the page from loading before the API is up
-:: and hitting transient 500s on the first /api/projects call.
-set /a BEND=0
-set /a FEND=0
-set /a WAIT=0
-
-:wait_loop
-ping -n 2 127.0.0.1 > nul
-call :show_new_logs
-set /a WAIT+=1
-if !WAIT! GTR 90 goto timeout_error
-
-:: 1) Backend ready? (curl exits 0 once the server accepts the connection.)
-curl -s --connect-timeout 1 --max-time 3 http://localhost:!CHOSEN_PORT!/health > nul 2>&1
-if !errorlevel! neq 0 goto wait_loop
-
-:: 2) Frontend ready?
-curl -s --connect-timeout 1 --max-time 3 http://localhost:5173 > nul 2>&1
-if !errorlevel! equ 0 goto services_ready
-goto wait_loop
-
-:timeout_error
-echo.
-echo  ERROR: Services did not become ready within ~3 minutes.
-echo  Review the [backend] and [frontend] log lines above for details.
-echo  Common causes:
-echo    - Port 5173 is already in use by another application
-echo    - The backend failed to start ^(check the [backend] lines above^)
-echo    - pnpm is not installed         ^(fix: npm install -g pnpm^)
-echo    - Frontend dependencies missing  ^(fix: cd frontend ^&^& pnpm install^)
-echo.
-echo  Press any key to close this window.
-pause > nul
-exit /b 1
-
-:services_ready
-start "" "http://localhost:5173"
-echo.
-echo  ==========================================
-echo   Both services are running.
-echo   Close this window to stop everything.
-echo  ==========================================
-echo.
-
-:: ---- Stream labeled log output until the window is closed ----
-:log_loop
-call :show_new_logs
-ping -n 2 127.0.0.1 > nul
-goto log_loop
-
-:: ---- Subroutine: print any new lines from each log with a service prefix ----
-:show_new_logs
-if not exist "!BLOG!" goto :show_front
-set /a BLINE=0
-for /f "usebackq tokens=* delims= eol=^" %%A in ("!BLOG!") do (
-    set /a BLINE+=1
-    if !BLINE! GTR !BEND! echo [backend] %%A
+:: ---- Wait for both services, open the browser, and stream the logs ----
+:: Done in PowerShell (scripts\wait_and_tail.ps1): cmd's "for /f" cannot read a log
+:: file while the service holds it open for writing and misreports it as missing,
+:: which produced "The system cannot find the file .runtime\ascape_back.log" on
+:: every tick. .NET reads shared files fine, and the script also strips Vite's
+:: colour codes. It returns 1 if the services never came up.
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\wait_and_tail.ps1" -BackendPort !CHOSEN_PORT! -BackLog "!BLOG!" -FrontLog "!FLOG!"
+if errorlevel 1 (
+    echo.
+    echo  Press any key to close this window.
+    pause > nul
+    exit /b 1
 )
-if !BLINE! GTR !BEND! set BEND=!BLINE!
-
-:show_front
-if not exist "!FLOG!" exit /b 0
-set /a FLINE=0
-for /f "usebackq tokens=* delims= eol=^" %%A in ("!FLOG!") do (
-    set /a FLINE+=1
-    if !FLINE! GTR !FEND! echo [frontend] %%A
-)
-if !FLINE! GTR !FEND! set FEND=!FLINE!
 exit /b 0
