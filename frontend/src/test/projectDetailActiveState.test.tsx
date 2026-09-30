@@ -156,7 +156,7 @@ describe("ProjectDetailPage P12 active-state behavior", () => {
     renderAt("/projects/42");
 
     const headerStrip = await screen.findByRole("region", {
-      name: /Project summary and settings/i,
+      name: /Project summary/i,
     });
     expect(headerStrip).toBeInTheDocument();
     expect(within(headerStrip).getByText("742 Evergreen Terrace")).toBeInTheDocument();

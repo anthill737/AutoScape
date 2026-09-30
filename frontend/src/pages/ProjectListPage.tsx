@@ -21,20 +21,34 @@ export default function ProjectListPage() {
     <div className="min-h-screen bg-surface text-foreground">
       <TopNav
         actions={
-          <button
-            onClick={() => navigate("/projects/new")}
-            className="rounded bg-accent px-4 py-2 text-accent-foreground transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-surface"
-          >
+          <button onClick={() => navigate("/projects/new")} className="btn-primary btn-sm">
             New Project
           </button>
         }
       />
 
-      <main className="max-w-5xl mx-auto px-4 py-8">
+      <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6">
+        <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <p className="as-eyebrow">Projects</p>
+            <h2 className="mt-1 text-2xl font-bold tracking-tight text-foreground">
+              Your spaces
+            </h2>
+            <p className="as-help mt-1">
+              Each project is one photo of a yard or a room, its design renders, and its build sheet.
+            </p>
+          </div>
+          {!loading && !error && projects.length > 0 && (
+            <button onClick={() => navigate("/projects/new")} className="btn-secondary">
+              + New Project
+            </button>
+          )}
+        </div>
+
         {loading && <p className="text-muted">Loading…</p>}
 
         {!loading && error && (
-          <p className="text-danger">Error loading projects: {error}</p>
+          <p className="alert-danger">Error loading projects: {error}</p>
         )}
 
         {!loading && !error && (

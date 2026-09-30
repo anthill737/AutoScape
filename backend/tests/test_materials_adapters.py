@@ -13,6 +13,7 @@ from app.domain.retailers import APPROVED_RETAILER_PROMPT_CONSTRAINT, APPROVED_R
 from app.providers.base import MaterialsAdapter, MissingApiKeyError
 from app.providers.claude_sonnet import ClaudeSonnetAdapter
 from app.providers.gemini_pro import _MAX_OUTPUT_TOKENS, GeminiProAdapter
+from app.providers.gemini_pro import _MODEL as _MOD_GEMINI_DEFAULT
 from app.providers.gpt5 import Gpt5Adapter
 from app.providers.materials_llm import MaterialsLLM
 
@@ -221,6 +222,10 @@ async def test_gpt5_returns_correct_schema(monkeypatch):
     request_kwargs = mock_client.chat.completions.create.await_args.kwargs
     assert request_kwargs["max_completion_tokens"] == _mod._MAX_COMPLETION_TOKENS
     assert "max_tokens" not in request_kwargs
+    # "minimal" is gpt-5 only and 400s on newer models; "low" works everywhere.
+    assert request_kwargs["reasoning_effort"] == "low"
+    assert request_kwargs["response_format"]["type"] == "json_schema"
+    assert request_kwargs["response_format"]["json_schema"]["strict"] is True
     _assert_build_sheet_schema(result)
 
 

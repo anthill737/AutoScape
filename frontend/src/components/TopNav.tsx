@@ -3,15 +3,18 @@ import { Link, NavLink } from "react-router-dom";
 import { THEME_OPTIONS, useTheme, type ThemeName } from "../theme/ThemeProvider";
 
 interface TopNavProps {
+  /** Page title shown after the brand, e.g. the project address. */
   title?: string;
+  /** Optional crumb shown before the title, e.g. "Projects". */
+  crumb?: { label: string; to: string };
   maxWidthClass?: string;
   actions?: ReactNode;
 }
 
 function navLinkClass({ isActive }: { isActive: boolean }) {
   return [
-    "text-sm font-medium transition",
-    isActive ? "text-accent" : "text-muted hover:text-foreground",
+    "rounded-lg px-3 py-1.5 text-sm font-medium transition",
+    isActive ? "bg-accent-soft text-accent" : "text-muted hover:bg-surface-sunken hover:text-foreground",
   ].join(" ");
 }
 
@@ -56,7 +59,7 @@ function ThemeSwitcher() {
     <div className="relative" ref={menuRef}>
       <button
         type="button"
-        className="inline-flex items-center gap-2 rounded-md border border-default bg-surface-elevated px-3 py-2 text-sm font-medium text-foreground shadow-sm transition hover:border-accent focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-surface"
+        className="btn-secondary btn-sm"
         aria-haspopup="menu"
         aria-expanded={isOpen}
         onClick={() => setIsOpen((open) => !open)}
@@ -71,7 +74,7 @@ function ThemeSwitcher() {
 
       {isOpen && (
         <div
-          className="absolute right-0 z-50 mt-2 w-56 rounded-md border border-default bg-surface-elevated p-1 shadow-lg"
+          className="absolute right-0 z-50 mt-2 w-56 rounded-xl border border-default bg-surface-elevated p-1 shadow-pop"
           role="menu"
           aria-label="Theme"
         >
@@ -82,7 +85,7 @@ function ThemeSwitcher() {
               <button
                 key={option.name}
                 type="button"
-                className="flex w-full items-center gap-3 rounded px-3 py-2 text-left text-sm text-foreground transition hover:bg-surface focus:bg-surface focus:outline-none"
+                className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm text-foreground transition hover:bg-surface-sunken focus:bg-surface-sunken focus:outline-none"
                 role="menuitemradio"
                 aria-checked={isActive}
                 onClick={() => selectTheme(option.name)}
@@ -105,29 +108,56 @@ function ThemeSwitcher() {
   );
 }
 
+function BrandMark() {
+  return (
+    <span
+      aria-hidden="true"
+      className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent text-sm font-extrabold text-accent-foreground shadow-sm"
+    >
+      A
+    </span>
+  );
+}
+
 export default function TopNav({
   title,
-  maxWidthClass = "max-w-5xl",
+  crumb,
+  maxWidthClass = "max-w-7xl",
   actions,
 }: TopNavProps) {
   return (
-    <header className="bg-surface-elevated shadow">
-      <div
-        className={`${maxWidthClass} mx-auto px-4 py-4 flex items-center justify-between gap-4`}
-      >
-        <div className="flex items-center gap-4 min-w-0">
-          <Link to="/" className="text-2xl font-bold text-foreground shrink-0">
-            AutoScape
+    <header className="sticky top-0 z-40 border-b border-default bg-surface-elevated/85 backdrop-blur supports-[backdrop-filter]:bg-surface-elevated/70">
+      <div className={`${maxWidthClass} mx-auto flex items-center justify-between gap-4 px-4 py-3 sm:px-6`}>
+        <div className="flex min-w-0 items-center gap-3">
+          <Link
+            to="/"
+            className="flex shrink-0 items-center gap-2 text-lg font-bold tracking-tight text-foreground"
+          >
+            <BrandMark />
+            <span>AutoScape</span>
           </Link>
+          {(crumb || title) && (
+            <span className="hidden text-border-strong sm:inline" aria-hidden="true">
+              /
+            </span>
+          )}
+          {crumb && (
+            <Link to={crumb.to} className="hidden text-sm text-muted hover:text-foreground sm:inline">
+              {crumb.label}
+            </Link>
+          )}
+          {crumb && title && (
+            <span className="hidden text-border-strong sm:inline" aria-hidden="true">
+              /
+            </span>
+          )}
           {title && (
-            <h1 className="text-xl font-semibold text-foreground truncate">
-              {title}
-            </h1>
+            <h1 className="truncate text-sm font-semibold text-foreground sm:text-base">{title}</h1>
           )}
         </div>
 
-        <nav className="flex items-center gap-4 shrink-0">
-          <NavLink to="/" className={navLinkClass}>
+        <nav className="flex shrink-0 items-center gap-1 sm:gap-2">
+          <NavLink to="/" className={navLinkClass} end>
             Projects
           </NavLink>
           <NavLink to="/settings" className={navLinkClass}>

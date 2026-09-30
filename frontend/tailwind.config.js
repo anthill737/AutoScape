@@ -3,58 +3,62 @@ export default {
   content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
   theme: {
     extend: {
+      fontFamily: {
+        sans: [
+          "Inter",
+          "ui-sans-serif",
+          "system-ui",
+          "-apple-system",
+          "Segoe UI",
+          "Roboto",
+          "sans-serif",
+        ],
+      },
       colors: {
         surface: "var(--color-surface)",
+        "surface-sunken": "var(--color-surface-sunken)",
         "surface-elevated": "var(--color-surface-elevated)",
         foreground: "var(--color-foreground)",
         muted: "var(--color-muted)",
-        // Legacy accent shades remain until follow-up P16 tasks replace existing color classes.
         accent: {
           DEFAULT: "var(--color-accent)",
+          strong: "var(--color-accent-strong)",
           foreground: "var(--color-accent-foreground)",
-          50: "#eef2ff",
-          100: "#e0e7ff",
-          200: "#c7d2fe",
-          300: "#a5b4fc",
-          500: "#6366f1",
-          600: "#4f46e5",
-          700: "#4338ca",
-          800: "#3730a3",
+          soft: "var(--color-accent-soft)",
         },
-        danger: "var(--color-danger)",
-        success: "var(--color-success)",
-        border: "var(--color-border)",
-        // Legacy chosen shades remain until follow-up P16 tasks replace existing color classes.
-        chosen: {
-          50: "#fffbeb",
-          100: "#fef3c7",
-          200: "#fde68a",
-          300: "#fcd34d",
-          500: "#f59e0b",
-          700: "#b45309",
-          800: "#92400e",
+        danger: {
+          DEFAULT: "var(--color-danger)",
+          soft: "var(--color-danger-soft)",
+        },
+        success: {
+          DEFAULT: "var(--color-success)",
+          soft: "var(--color-success-soft)",
+        },
+        warning: {
+          DEFAULT: "var(--color-warning)",
+          soft: "var(--color-warning-soft)",
+        },
+        border: {
+          DEFAULT: "var(--color-border)",
+          strong: "var(--color-border-strong)",
         },
       },
       borderColor: {
         default: "var(--color-border)",
+        strong: "var(--color-border-strong)",
       },
-      textColor: {
-        "accent-foreground": "var(--color-accent-foreground)",
-      },
-      backgroundColor: {
-        accent: "var(--color-accent)",
-      },
-      ringColor: {
-        accent: "var(--color-accent)",
-      },
-      outlineColor: {
-        accent: "var(--color-accent)",
-      },
+      // bg-accent, text-accent-foreground, ring-accent, outline-accent, divide-* and
+      // placeholder colours all derive from `colors` above; per-plugin overrides here
+      // would shadow the nested tokens (bg-accent-soft etc.).
       divideColor: {
         default: "var(--color-border)",
       },
-      placeholderColor: {
-        muted: "var(--color-muted)",
+      boxShadow: {
+        card: "var(--shadow-card)",
+        pop: "var(--shadow-pop)",
+      },
+      borderRadius: {
+        xl2: "1rem",
       },
     },
   },

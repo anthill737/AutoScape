@@ -178,6 +178,37 @@ class TestCreateDesignRequest:
         assert "id" in body
         assert body["project_id"] == project_id
 
+    def test_default_image_model_is_recorded_when_none_given(self, client, project_id):
+        c, _ = client
+        with patch.object(GeminiFlashImageAdapter, "generate", new_callable=AsyncMock) as mock_gen:
+            mock_gen.return_value = [_FAKE_RENDER_BYTES] * 3
+            resp = c.post(f"/api/projects/{project_id}/design-requests", json=_VALID_BODY)
+
+        assert resp.status_code == 201
+        assert resp.json()["image_model"] == _GEMINI_MODEL
+        listed = c.get(f"/api/projects/{project_id}/design-requests").json()
+        assert listed[0]["image_model"] == _GEMINI_MODEL
+
+    def test_explicit_image_model_is_passed_to_adapter_and_stored(self, client, project_id):
+        c, _ = client
+        seen: dict = {}
+
+        def fake_make_adapter(self, model=None):
+            seen["model"] = model
+            adapter = GeminiFlashImageAdapter(model=model)
+            adapter.generate = AsyncMock(return_value=[_FAKE_RENDER_BYTES] * 3)
+            return adapter
+
+        body = {**_VALID_BODY, "image_model": "  gemini-3-pro-image "}
+        with patch("app.main.ImageProvider.make_adapter", fake_make_adapter):
+            resp = c.post(f"/api/projects/{project_id}/design-requests", json=body)
+
+        assert resp.status_code == 201
+        assert seen["model"] == "gemini-3-pro-image"
+        assert resp.json()["image_model"] == "gemini-3-pro-image"
+        project = c.get(f"/api/projects/{project_id}").json()
+        assert project["design_requests"][0]["image_model"] == "gemini-3-pro-image"
+
     def test_response_has_exactly_3_renders(self, client, project_id):
         c, _ = client
         with patch.object(GeminiFlashImageAdapter, "generate", new_callable=AsyncMock) as mock_gen:
@@ -439,7 +470,7 @@ class TestIterationDesignRequest:
         body = {**_VALID_BODY, "parent_render_id": parent_render_id}
         captured = {}
 
-        async def fake_generate(self, image_b64, prompt):
+        async def fake_generate(self, image_b64, prompt, **kwargs):
             import base64
 
             captured["image_bytes"] = base64.b64decode(image_b64)

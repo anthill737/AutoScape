@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import TopNav from "../components/TopNav";
+import type { ProviderModels } from "../api/models";
+import { useModelCatalog } from "../hooks/useModelCatalog";
 import {
   SETTINGS_KEYS,
   SettingsKeyName,
@@ -20,12 +22,6 @@ const EMPTY_TEST_STATES = Object.fromEntries(
   SETTINGS_KEYS.map((key) => [key.name, { status: "idle" }]),
 ) as Record<SettingsKeyName, TestState>;
 
-function statusPill(isSet: boolean) {
-  return isSet
-    ? "bg-surface-elevated text-success border-success"
-    : "bg-surface text-muted border-default";
-}
-
 export default function SettingsPage() {
   const [keys, setKeys] = useState<SettingsKeyStatus[]>([]);
   const [loading, setLoading] = useState(true);
@@ -36,6 +32,7 @@ export default function SettingsPage() {
   const [clearing, setClearing] = useState<SettingsKeyName | null>(null);
   const [testStates, setTestStates] =
     useState<Record<SettingsKeyName, TestState>>(EMPTY_TEST_STATES);
+  const models = useModelCatalog();
 
   useEffect(() => {
     listSettingsKeys()
@@ -69,6 +66,7 @@ export default function SettingsPage() {
       updateKey(updated);
       setEditing(null);
       setDraftValue("");
+      void models.refresh();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
@@ -88,6 +86,7 @@ export default function SettingsPage() {
         ...current,
         [name]: { status: "idle" },
       }));
+      void models.refresh();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
@@ -121,18 +120,22 @@ export default function SettingsPage() {
 
   return (
     <div className="min-h-screen bg-surface text-foreground">
-      <TopNav title="Settings" />
+      <TopNav title="Settings" crumb={{ label: "Projects", to: "/" }} maxWidthClass="max-w-5xl" />
 
-      <main className="max-w-5xl mx-auto px-4 py-8">
-        {loading && <p className="text-muted">Loading settings...</p>}
-        {error && (
-          <p className="mb-4 rounded border border-danger bg-surface-elevated px-3 py-2 text-danger">
-            {error}
+      <main className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
+        <div className="mb-6">
+          <p className="as-eyebrow">Settings</p>
+          <h2 className="mt-1 text-2xl font-bold tracking-tight text-foreground">API keys</h2>
+          <p className="as-help mt-1">
+            Keys are stored in the project's secrets folder on this machine and never leave it.
+            Each vendor bills your own account per request.
           </p>
-        )}
+        </div>
+        {loading && <p className="text-muted">Loading settings...</p>}
+        {error && <p className="alert-danger mb-4">{error}</p>}
 
         {!loading && (
-          <div className="bg-surface-elevated rounded border border-default shadow overflow-hidden">
+          <div className="as-card overflow-hidden">
             <div className="divide-y divide-default">
               {SETTINGS_KEYS.map((settingsKey) => {
                 const keyStatus = keyByName.get(settingsKey.name) ?? {
@@ -155,9 +158,7 @@ export default function SettingsPage() {
                           <h2 className="font-semibold text-foreground">
                             {settingsKey.name}
                           </h2>
-                          <span
-                            className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium ${statusPill(keyStatus.set)}`}
-                          >
+                          <span className={keyStatus.set ? "pill-success" : "pill-muted"}>
                             {keyStatus.set ? "Set" : "Not set"}
                           </span>
                         </div>
@@ -178,7 +179,7 @@ export default function SettingsPage() {
                         <button
                           type="button"
                           onClick={() => startEditing(settingsKey.name)}
-                          className="px-3 py-2 rounded border border-default text-sm font-medium text-foreground hover:bg-surface"
+                          className="btn-secondary btn-sm"
                         >
                           Edit
                         </button>
@@ -186,7 +187,7 @@ export default function SettingsPage() {
                           type="button"
                           onClick={() => handleClear(settingsKey.name)}
                           disabled={clearing === settingsKey.name}
-                          className="px-3 py-2 rounded border border-default text-sm font-medium text-foreground hover:bg-surface disabled:opacity-50"
+                          className="btn-secondary btn-sm"
                         >
                           {clearing === settingsKey.name ? "Clearing..." : "Clear"}
                         </button>
@@ -194,7 +195,7 @@ export default function SettingsPage() {
                           type="button"
                           onClick={() => handleTest(settingsKey.name)}
                           disabled={testState.status === "loading"}
-                          className="inline-flex min-w-20 items-center justify-center gap-2 px-3 py-2 rounded bg-accent text-sm font-medium text-accent-foreground hover:brightness-95 disabled:opacity-70"
+                          className="btn-primary btn-sm min-w-20"
                         >
                           {testState.status === "loading" && (
                             <span
@@ -217,14 +218,14 @@ export default function SettingsPage() {
                           type="password"
                           value={draftValue}
                           onChange={(e) => setDraftValue(e.target.value)}
-                          className="min-w-0 flex-1 rounded border border-default bg-surface-elevated px-3 py-2 text-foreground focus:outline-none focus:ring-2 focus:ring-accent"
+                          className="field min-w-0 flex-1"
                           autoFocus
                         />
                         <button
                           type="button"
                           onClick={() => handleSave(settingsKey.name)}
                           disabled={saving === settingsKey.name}
-                          className="bg-accent text-accent-foreground px-4 py-2 rounded hover:brightness-95 disabled:opacity-50"
+                          className="btn-primary"
                         >
                           {saving === settingsKey.name ? "Saving..." : "Save"}
                         </button>
@@ -234,7 +235,7 @@ export default function SettingsPage() {
                             setEditing(null);
                             setDraftValue("");
                           }}
-                          className="bg-surface text-foreground border border-default px-4 py-2 rounded hover:brightness-95"
+                          className="btn-secondary"
                         >
                           Cancel
                         </button>
@@ -245,9 +246,7 @@ export default function SettingsPage() {
                       <p className="mt-3 text-sm font-medium text-success">OK</p>
                     )}
                     {testState.status === "error" && (
-                      <p className="mt-3 text-sm font-medium text-danger">
-                        X {testState.error}
-                      </p>
+                      <p className="alert-danger mt-3 font-medium">{testState.error}</p>
                     )}
                   </section>
                 );
@@ -255,7 +254,112 @@ export default function SettingsPage() {
             </div>
           </div>
         )}
+
+        {!loading && (
+          <AvailableModelsPanel
+            providers={[
+              ...models.catalog.image,
+              ...models.catalog.materials,
+              ...models.catalog.grounding,
+            ]}
+            loading={models.loading}
+            error={models.error}
+            onRefresh={() => void models.refresh()}
+          />
+        )}
       </main>
     </div>
+  );
+}
+
+const ROLE_LABELS: Record<ProviderModels["role"], string> = {
+  image: "Renders",
+  materials: "Build Sheet",
+  grounding: "Product research",
+};
+
+function AvailableModelsPanel({
+  providers,
+  loading,
+  error,
+  onRefresh,
+}: {
+  providers: ProviderModels[];
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  return (
+    <section aria-label="Available models" className="mt-8">
+      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold text-foreground">Available models</h2>
+          <p className="text-sm text-muted">
+            Fetched live from each vendor with your keys. Pick a model per request on the
+            project page; these lists show what is currently offered.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={loading}
+          className="btn-secondary btn-sm"
+        >
+          {loading ? "Refreshing..." : "Refresh models"}
+        </button>
+      </div>
+      {error && (
+        <p className="alert-danger mb-3">{error}</p>
+      )}
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        {providers.map((provider) => (
+          <article
+            key={provider.slug}
+            aria-label={`${provider.label} models`}
+            className="as-card p-4"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="font-semibold text-foreground">{provider.label}</h3>
+              <span className="pill-muted">{ROLE_LABELS[provider.role]}</span>
+            </div>
+            <p className="mt-1 text-xs text-muted">
+              {provider.key_set
+                ? provider.source === "live"
+                  ? `${provider.models.length} models from ${provider.vendor}`
+                  : "Built-in list (vendor list unavailable)"
+                : `${provider.key_env} not set — built-in list`}
+              {provider.error && provider.key_set ? ` · ${provider.error}` : ""}
+            </p>
+            <ul className="mt-2 max-h-56 space-y-1 overflow-y-auto text-sm text-foreground">
+              {provider.models
+                .filter((m) => m.current)
+                .map((m) => (
+                  <li key={m.id} className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-0.5">
+                    <span className="flex flex-wrap items-baseline gap-2">
+                      <span>{m.display_name}</span>
+                      <code className="text-xs text-muted">{m.id}</code>
+                      {m.recommended && (
+                        <span className="text-[11px] uppercase text-accent">recommended</span>
+                      )}
+                    </span>
+                    <span className="text-xs text-muted" aria-label="quality">
+                      {m.quality != null ? "●".repeat(m.quality) + "○".repeat(5 - m.quality) : ""}
+                    </span>
+                    <span className="col-span-2 text-xs text-muted">
+                      {[m.cost, m.note].filter(Boolean).join(" · ")}
+                    </span>
+                  </li>
+                ))}
+              {provider.models.some((m) => !m.current) && (
+                <li className="text-xs text-muted">
+                  + {provider.models.filter((m) => !m.current).length} older or snapshot ids
+                  (available under "Show older" on the project page)
+                </li>
+              )}
+            </ul>
+          </article>
+        ))}
+      </div>
+    </section>
   );
 }

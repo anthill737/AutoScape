@@ -26,6 +26,12 @@ class Project(Base):
     address = Column(String, nullable=False)
     lot_size_sqft = Column(Float, nullable=True)
     house_sqft = Column(Float, nullable=True)
+    # "exterior" (yard/landscape) or "interior" (room); see app.domain.spaces.
+    space_type = Column(String, nullable=False, default="exterior", server_default="exterior")
+    # Interior only: which room the site photo shows (e.g. "Kitchen").
+    room_type = Column(String, nullable=True)
+    # Size inputs keyed by the space's size_fields, e.g. {"room_length_ft": 14, ...}.
+    space_details = Column(JSON, nullable=True)
     site_photo_path = Column(String, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -44,6 +50,8 @@ class DesignRequest(Base):
         nullable=True,
     )
     image_provider = Column(String, nullable=False)
+    # Concrete vendor model id used for this request (None = vendor default at the time).
+    image_model = Column(String, nullable=True)
     feature_categories = Column(JSON, nullable=False)
     style = Column(String, nullable=False)
     quality_tier = Column(String, nullable=False)
@@ -88,6 +96,9 @@ class BuildSheet(Base):
     id = Column(Integer, primary_key=True)
     render_id = Column(Integer, ForeignKey("render.id"), nullable=False)
     materials_llm = Column(String, nullable=False)
+    # Concrete vendor model ids used for this sheet (None = vendor default at the time).
+    materials_model = Column(String, nullable=True)
+    grounding_model = Column(String, nullable=True)
     content_json = Column(Text, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 

@@ -4,10 +4,14 @@ import os
 
 from openai import AsyncOpenAI
 
+from app.domain.spaces import SpaceConfig
 from app.providers.base import MissingApiKeyError, ProviderAdapter, missing_api_key_message
 from app.providers.image_prompt import enhance_landscape_render_prompt
+from app.providers.model_catalog import default_model_for
 
-_GPT_IMAGE_MODEL = "gpt-image-2"
+# Default OpenAI image model; any gpt-image-* model from the catalog can be passed in.
+_GPT_IMAGE_MODEL = default_model_for("gpt_image")
+_QUALITY = "medium"  # accepted by every gpt-image-* generation
 
 
 def _image_file_tuple(image_bytes: bytes) -> tuple[str, io.BytesIO, str]:
@@ -21,9 +25,14 @@ def _image_file_tuple(image_bytes: bytes) -> tuple[str, io.BytesIO, str]:
 
 
 class GptImageAdapter(ProviderAdapter):
-    """Image Provider adapter for OpenAI gpt-image-2."""
+    """Image Provider adapter for OpenAI gpt-image-* models (images.edit)."""
 
-    async def generate(self, image_b64: str, prompt: str) -> list[bytes]:
+    def __init__(self, model: str | None = None) -> None:
+        self.model = model or _GPT_IMAGE_MODEL
+
+    async def generate(
+        self, image_b64: str, prompt: str, space: SpaceConfig | None = None
+    ) -> list[bytes]:
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise MissingApiKeyError(
@@ -34,11 +43,11 @@ class GptImageAdapter(ProviderAdapter):
         client = AsyncOpenAI(api_key=api_key)
 
         response = await client.images.edit(
-            model=_GPT_IMAGE_MODEL,
+            model=self.model,
             image=_image_file_tuple(image_bytes),
-            prompt=enhance_landscape_render_prompt(prompt),
+            prompt=enhance_landscape_render_prompt(prompt, space),
             n=3,
-            quality="medium",
+            quality=_QUALITY,
         )
 
         result: list[bytes] = []
@@ -46,10 +55,10 @@ class GptImageAdapter(ProviderAdapter):
             if item.b64_json:
                 result.append(base64.b64decode(item.b64_json))
             elif item.url:
-                # Fallback: if URL was returned instead of b64.
+                # GPT image models always return b64_json; a URL means a non-GPT model.
                 raise ValueError(
-                    "GptImage returned a URL instead of b64_json — "
-                    "set response_format='b64_json' or check model capabilities."
+                    f"GptImage model {self.model} returned a URL instead of b64_json; "
+                    "choose a gpt-image-* model."
                 )
             else:
                 raise ValueError("GptImage returned an image item with neither b64_json nor url.")

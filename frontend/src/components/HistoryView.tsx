@@ -12,18 +12,11 @@ function activeAt(project: ProjectListItem) {
 
 function formatDate(value: string | null) {
   if (!value) return "No date";
-  return new Date(value).toLocaleDateString();
-}
-
-function qualityPillClass(quality: string) {
-  const normalized = quality.toLowerCase();
-  if (normalized.includes("premium")) {
-    return "border-accent text-accent";
-  }
-  if (normalized.includes("budget")) {
-    return "border-default text-muted";
-  }
-  return "border-default text-foreground";
+  return new Date(value).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 }
 
 function sortedProjects(projects: ProjectListItem[]) {
@@ -34,18 +27,37 @@ function sortedProjects(projects: ProjectListItem[]) {
   });
 }
 
+/** Where the project is in the photo → renders → chosen → build sheet flow. */
+function stageOf(project: ProjectListItem): { label: string; tone: string; step: number } {
+  if (project.has_build_sheet) return { label: "Build Sheet ready", tone: "pill-success", step: 4 };
+  if (project.has_chosen_render) return { label: "Render chosen", tone: "pill-accent", step: 3 };
+  if (project.render_count > 0) return { label: "Renders ready", tone: "pill-accent", step: 2 };
+  return { label: "Needs renders", tone: "pill-muted", step: 1 };
+}
+
+function spaceBadge(project: ProjectListItem): string {
+  if (project.space_label) return project.space_label;
+  return project.space_type === "interior" ? "Interior" : "Outdoor";
+}
+
 export default function HistoryView({ projects, onCreateProject }: HistoryViewProps) {
   if (projects.length === 0) {
     return (
-      <div className="mx-auto max-w-xl py-20 text-center">
-        <p className="text-xl font-semibold text-foreground">
+      <div className="as-card mx-auto max-w-xl px-8 py-16 text-center">
+        <div
+          aria-hidden="true"
+          className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-accent-soft text-2xl"
+        >
+          ✦
+        </div>
+        <p className="text-xl font-semibold tracking-tight text-foreground">
           No projects yet - create one to get started.
         </p>
-        <button
-          type="button"
-          onClick={onCreateProject}
-          className="mt-6 rounded bg-accent px-5 py-3 text-base font-medium text-accent-foreground transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-surface"
-        >
+        <p className="as-help mt-2">
+          Upload a photo of a yard or a room, generate three design renders, then turn your
+          favourite into a priced build sheet.
+        </p>
+        <button type="button" onClick={onCreateProject} className="btn-primary btn-lg mt-6">
           New Project
         </button>
       </div>
@@ -57,6 +69,7 @@ export default function HistoryView({ projects, onCreateProject }: HistoryViewPr
       {sortedProjects(projects).map((project) => {
         const thumbnailUrl = project.site_photo_thumb_url ?? project.site_photo_url;
         const qualityTier = project.latest_quality_tier;
+        const stage = stageOf(project);
         const countLine = `${project.design_request_count} Design Requests · ${project.render_count} Renders · ${project.iteration_count} Iterations`;
 
         return (
@@ -64,58 +77,54 @@ export default function HistoryView({ projects, onCreateProject }: HistoryViewPr
             key={project.id}
             to={`/projects/${project.id}`}
             aria-label={`Open project ${project.address}`}
-            className="group flex h-full flex-col overflow-hidden rounded-lg border border-default bg-surface-elevated shadow-sm transition hover:-translate-y-0.5 hover:border-accent hover:shadow-md focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-surface"
+            className="as-card group flex h-full flex-col overflow-hidden transition hover:-translate-y-0.5 hover:border-strong hover:shadow-pop focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
           >
-            <div className="aspect-video w-full overflow-hidden bg-surface">
+            <div className="relative aspect-[4/3] w-full overflow-hidden bg-surface-sunken">
               {thumbnailUrl ? (
                 <img
                   src={thumbnailUrl}
                   alt={project.address}
                   loading="lazy"
-                  className="h-full w-full object-contain"
+                  className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
                 />
               ) : (
                 <div className="flex h-full w-full items-center justify-center text-sm text-muted">
                   No photo
                 </div>
               )}
+              <span className="absolute left-3 top-3 rounded-full bg-surface-elevated/90 px-2.5 py-1 text-[11px] font-semibold text-foreground shadow-sm backdrop-blur">
+                {spaceBadge(project)}
+              </span>
             </div>
 
             <div className="flex flex-1 flex-col p-4">
               <div className="min-w-0">
-                <h2 className="truncate text-base font-semibold text-foreground">
+                <h2 className="truncate text-base font-semibold tracking-tight text-foreground">
                   {project.address}
                 </h2>
-                <p className="mt-1 text-sm text-muted">
-                  Created {formatDate(project.created_at)}
+                <p className="mt-1 text-xs text-muted">
+                  Updated {formatDate(activeAt(project))}
                 </p>
-                <p className="mt-3 text-sm text-foreground">{countLine}</p>
+                <p className="mt-3 text-sm text-muted">{countLine}</p>
               </div>
 
-              <div className="mt-4 flex flex-wrap gap-2">
-                {project.has_chosen_render && (
-                  <span className="rounded-full border border-accent bg-surface px-2.5 py-1 text-xs font-medium text-accent">
-                    Chosen
-                  </span>
-                )}
-                {project.has_build_sheet && (
-                  <span className="rounded-full border border-default bg-surface px-2.5 py-1 text-xs font-medium text-foreground">
-                    Build Sheet
-                  </span>
-                )}
-                {qualityTier && (
-                  <span
-                    className={`rounded-full border px-2.5 py-1 text-xs font-medium ${qualityPillClass(
-                      qualityTier,
-                    )}`}
-                  >
-                    {qualityTier}
-                  </span>
-                )}
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <span className={stage.tone}>{stage.label}</span>
+                {project.has_chosen_render && <span className="pill-muted">Chosen</span>}
+                {project.has_build_sheet && <span className="pill-muted">Build Sheet</span>}
+                {qualityTier && <span className="pill-muted">{qualityTier}</span>}
               </div>
 
-              <div className="mt-auto pt-5 text-sm font-medium text-accent">
-                Open
+              <div className="mt-auto flex items-center justify-between pt-5">
+                <div className="flex gap-1" aria-label={`Step ${stage.step} of 4`}>
+                  {[1, 2, 3, 4].map((n) => (
+                    <span
+                      key={n}
+                      className={`h-1.5 w-6 rounded-full ${n <= stage.step ? "bg-accent" : "bg-border"}`}
+                    />
+                  ))}
+                </div>
+                <span className="text-sm font-medium text-accent">Open</span>
               </div>
             </div>
           </Link>

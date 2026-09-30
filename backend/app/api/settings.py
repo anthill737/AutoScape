@@ -71,17 +71,20 @@ async def _google_tester(api_key: str) -> None:
 
 
 async def _perplexity_tester(api_key: str) -> None:
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    # Sonar Chat Completions was retired 2026-09-27; the Agent API is the replacement.
+    from app.providers.search_grounding import PERPLEXITY_AGENT_URL
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
-            "https://api.perplexity.ai/chat/completions",
+            PERPLEXITY_AGENT_URL,
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             json={
-                "model": "sonar",
-                "messages": [{"role": "user", "content": "Reply with ok."}],
-                "max_tokens": 4,
+                "model": "perplexity/sonar",
+                "input": "Reply with ok.",
+                "max_output_tokens": 16,
             },
         )
         response.raise_for_status()

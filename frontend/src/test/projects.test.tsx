@@ -6,6 +6,9 @@ import ProjectListPage from "../pages/ProjectListPage";
 import NewProjectPage from "../pages/NewProjectPage";
 import ProjectDetailPage from "../pages/ProjectDetailPage";
 import { ThemeProvider } from "../theme/ThemeProvider";
+import { fetchRetryOptions } from "../api/projects";
+
+const defaultRetryDelay = fetchRetryOptions.delayMs;
 
 function renderAt(path: string) {
   return render(
@@ -29,6 +32,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  fetchRetryOptions.delayMs = defaultRetryDelay;
 });
 
 // ---------------------------------------------------------------------------
@@ -55,7 +59,10 @@ describe("ProjectListPage — empty state", () => {
   });
 
   it("shows the API detail string when loading projects fails", async () => {
-    (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+    // listProjects retries 5xx responses, so every attempt must see the 500
+    // (persistent mock) and the retry delay is zeroed to keep the test fast.
+    fetchRetryOptions.delayMs = 0;
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok: false,
       status: 500,
       json: async () => ({
@@ -236,7 +243,7 @@ describe("ProjectListPage — with projects", () => {
     await userEvent.click(screen.getByText("7 Lucky Lane"));
 
     await waitFor(() => {
-      expect(screen.getByText("4,000 sqft")).toBeInTheDocument();
+      expect(screen.getByText(/4,000 sqft/)).toBeInTheDocument();
     });
   });
 });
@@ -251,8 +258,8 @@ describe("NewProjectPage", () => {
 
     expect(screen.getByText(/Site Photo/i)).toBeInTheDocument();
     expect(screen.getByText(/Address/i)).toBeInTheDocument();
-    expect(screen.getByText(/Lot Size/i)).toBeInTheDocument();
-    expect(screen.getByText(/House Sqft/i)).toBeInTheDocument();
+    expect(screen.getByText(/Lot size/i)).toBeInTheDocument();
+    expect(screen.getByText(/House size/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Save/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Cancel/i })).toBeInTheDocument();
   });
@@ -305,7 +312,7 @@ describe("NewProjectPage", () => {
     await userEvent.click(screen.getByRole("button", { name: /Save/i }));
 
     await waitFor(() => {
-      expect(screen.getByText("3,000 sqft")).toBeInTheDocument();
+      expect(screen.getByText(/3,000 sqft/)).toBeInTheDocument();
     });
 
     const [, createInit] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];

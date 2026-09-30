@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import logging
@@ -18,18 +19,23 @@ from app.bootstrap import startup_key_presence
 from app.database import DATABASE_URL, get_db
 from app.domain.build_sheet_validation import validate_build_sheet_material_urls
 from app.domain.retailers import APPROVED_RETAILERS
+from app.domain.spaces import SPACES, SpaceConfig, get_space, is_known_space, space_catalog
 from app.models import BuildSheet, DesignRequest, Project, Render
 from app.providers.base import MissingApiKeyError
-from app.providers.claude_sonnet import suggest_dimension_defaults
+from app.providers.dimension_defaults import suggest_dimension_defaults
 from app.providers.exceptions import ImageProviderAuthError, ImageProviderQuotaError
 from app.providers.image_provider import ImageProvider
 from app.providers.materials_llm import MaterialsLLM
-from app.providers.search_grounding import SearchGrounding
+from app.providers.model_catalog import catalog as model_catalog
+from app.providers.model_catalog import default_model_for
+from app.providers.search_grounding import SearchGrounding, SearchGroundingError
 from app.schemas import (
     BuildSheetCreate,
     BuildSheetOut,
     DesignRequestCreate,
     DesignRequestOut,
+    DimensionDefaultsRequest,
+    ModelCatalogOut,
     ProjectDetail,
     ProjectListItem,
     RenderOut,
@@ -54,6 +60,16 @@ def _database_location_for_log() -> str:
     if DATABASE_URL.startswith("sqlite:///"):
         return str(Path(DATABASE_URL.removeprefix("sqlite:///")).resolve())
     return DATABASE_URL
+
+
+def _grounding_http_status(vendor_status: int) -> int:
+    if vendor_status == 429:
+        return 429
+    if vendor_status in {401, 402, 403}:
+        return 401
+    if vendor_status >= 500:
+        return 503
+    return 502
 
 
 def _provider_error_status(exc: Exception) -> int:
@@ -90,7 +106,29 @@ async def lifespan(app: FastAPI):
         ", ".join(missing_keys) or "none",
     )
 
+    # Warm the model catalog and warn if a default model has disappeared from a vendor.
+    # Runs in the background so startup is never blocked on vendor APIs; disabled in
+    # tests via AUTOSCAPE_STARTUP_MODEL_CHECK=0.
+    check_task: asyncio.Task | None = None
+    if os.getenv("AUTOSCAPE_STARTUP_MODEL_CHECK", "1") != "0":
+        check_task = asyncio.create_task(_startup_model_check())
+
     yield
+
+    if check_task is not None and not check_task.done():
+        check_task.cancel()
+
+
+async def _startup_model_check() -> None:
+    try:
+        warnings = await model_catalog.check_defaults()
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never crash the server
+        logger.warning("[models] startup model check failed: %s: %s", exc.__class__.__name__, exc)
+        return
+    if not warnings:
+        logger.info("[models] all default models are available from their vendors")
+    for warning in warnings:
+        logger.warning("[models] %s", warning)
 
 
 app = FastAPI(title="AutoScape API", version="0.1.0", lifespan=lifespan)
@@ -113,12 +151,70 @@ def _render_image_url(render_id: int) -> str:
     return f"/renders/{render_id}"
 
 
+def _project_space(project: Project | None) -> SpaceConfig:
+    return get_space(project.space_type if project is not None else None)
+
+
+def _project_space_fields(project: Project) -> dict:
+    """The space-related fields shared by every Project response shape."""
+    space = _project_space(project)
+    return {
+        "space_type": space.id,
+        "room_type": project.room_type,
+        "space_details": project.space_details,
+        "space_label": space.room_label(project.room_type),
+    }
+
+
+def _parse_space_details(raw: str | None) -> dict:
+    """``space_details`` arrives as a JSON object string in the multipart form."""
+    if raw is None or not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="space_details must be a JSON object.")
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=422, detail="space_details must be a JSON object.")
+    return parsed
+
+
+def _validate_size_fields(space: SpaceConfig, details: dict) -> dict:
+    """Coerce the space's size fields to numbers; 422 if a required one is missing or <= 0."""
+    cleaned = dict(details)
+    for field in space.size_fields:
+        key, label = field["key"], field["label"]
+        value = details.get(key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            if field.get("required"):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{label} ('{key}') is required for {space.label.lower()} projects.",
+                )
+            cleaned.pop(key, None)
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=422, detail=f"{label} ('{key}') must be a number."
+            )
+        if number <= 0:
+            raise HTTPException(
+                status_code=422, detail=f"{label} ('{key}') must be greater than 0."
+            )
+        cleaned[key] = number
+    return cleaned
+
+
 def _build_sheet_out(bs: BuildSheet) -> BuildSheetOut:
     content = json.loads(bs.content_json)
     return BuildSheetOut(
         id=bs.id,
         render_id=bs.render_id,
         materials_llm=bs.materials_llm,
+        materials_model=bs.materials_model,
+        grounding_model=bs.grounding_model,
         material_items=content.get("material_items", []),
         tool_list=content.get("tool_list", []),
         build_steps=content.get("build_steps", []),
@@ -147,6 +243,7 @@ def _design_request_out(dr: DesignRequest) -> DesignRequestOut:
         project_id=dr.project_id,
         parent_render_id=dr.parent_render_id,
         image_provider=dr.image_provider,
+        image_model=dr.image_model,
         feature_categories=dr.feature_categories,
         style=dr.style,
         quality_tier=dr.quality_tier,
@@ -162,8 +259,29 @@ async def health() -> dict[str, str]:
 
 
 @app.get("/api/approved-retailers")
-def list_approved_retailers() -> list[dict[str, str]]:
-    return [dict(retailer) for retailer in APPROVED_RETAILERS]
+def list_approved_retailers(space_type: str | None = None) -> list[dict[str, str]]:
+    """Approved retailers; the exterior list by default, or a space's list via ?space_type=."""
+    if space_type is None:
+        return [dict(retailer) for retailer in APPROVED_RETAILERS]
+    return [dict(retailer) for retailer in get_space(space_type).retailers]
+
+
+@app.get("/api/spaces")
+def list_spaces() -> dict:
+    """Every space the app can design (exterior / interior) with its categories, styles,
+    dimension fields, size inputs, room types, retailers and prompt fragments."""
+    return {"spaces": space_catalog()}
+
+
+@app.get("/api/models", response_model=ModelCatalogOut)
+async def list_models(refresh: bool = False) -> ModelCatalogOut:
+    """Models each vendor currently offers, grouped by role (image / materials / grounding).
+
+    Lists are fetched live from the vendors and cached for a few minutes; when a key is
+    missing or a vendor call fails, a static fallback list is returned with ``source``
+    set to ``fallback`` and the error message in ``error``.
+    """
+    return ModelCatalogOut(**(await model_catalog.catalog(refresh=refresh)))
 
 
 @app.post("/api/projects", status_code=201)
@@ -171,7 +289,10 @@ async def create_project(
     address: str = Form(...),
     lot_size_sqft: float | None = Form(None),
     lot_size: float | None = Form(None),
-    house_sqft: float = Form(...),
+    house_sqft: float | None = Form(None),
+    space_type: str = Form("exterior"),
+    room_type: str | None = Form(None),
+    space_details: str | None = Form(None),
     site_photo: UploadFile = File(...),
     db: Session = Depends(get_db),
     data_dir: Path = Depends(get_data_dir),
@@ -185,14 +306,57 @@ async def create_project(
             ),
         )
 
-    resolved_lot_size_sqft = lot_size_sqft if lot_size_sqft is not None else lot_size
-    if resolved_lot_size_sqft is None:
-        raise HTTPException(status_code=422, detail="Lot size is required.")
+    if not is_known_space(space_type):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown space_type: {space_type!r}. Valid values: {list(SPACES)}",
+        )
+    space = get_space(space_type)
+    details = _parse_space_details(space_details)
+
+    resolved_room_type: str | None = None
+    if space.room_types:
+        resolved_room_type = room_type.strip() if isinstance(room_type, str) else None
+        if resolved_room_type not in space.room_types:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"room_type is required for {space.label.lower()} projects and must be "
+                    f"one of {space.room_types} (got {room_type!r})."
+                ),
+            )
+
+    if space.id == "exterior":
+        # Legacy landscape inputs: lot_size_sqft (or the older lot_size) and house_sqft are
+        # required form fields; they are mirrored into space_details so it is always set.
+        resolved_lot_size_sqft = lot_size_sqft if lot_size_sqft is not None else lot_size
+        if resolved_lot_size_sqft is None:
+            resolved_lot_size_sqft = details.get("lot_size_sqft")
+        if resolved_lot_size_sqft is None:
+            raise HTTPException(status_code=422, detail="Lot size is required.")
+        if house_sqft is None:
+            house_sqft = details.get("house_sqft")
+        if house_sqft is None:
+            raise HTTPException(status_code=422, detail="House size is required.")
+        try:
+            resolved_lot_size_sqft = float(resolved_lot_size_sqft)
+            house_sqft = float(house_sqft)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=422, detail="Lot size and house size must be numbers."
+            )
+        details = {**details, "lot_size_sqft": resolved_lot_size_sqft, "house_sqft": house_sqft}
+    else:
+        resolved_lot_size_sqft = lot_size_sqft if lot_size_sqft is not None else lot_size
+        details = _validate_size_fields(space, details)
 
     project = Project(
         address=address,
         lot_size_sqft=resolved_lot_size_sqft,
         house_sqft=house_sqft,
+        space_type=space.id,
+        room_type=resolved_room_type,
+        space_details=details,
     )
     db.add(project)
     db.flush()
@@ -211,6 +375,7 @@ async def create_project(
         "project_id": project.id,
         "address": project.address,
         "created_at": project.created_at,
+        **_project_space_fields(project),
     }
 
 
@@ -234,6 +399,7 @@ def list_projects(
             ProjectListItem(
                 id=p.id,
                 address=p.address,
+                **_project_space_fields(p),
                 site_photo_url=f"/images/{p.id}/site_photo.jpg" if p.site_photo_path else None,
                 site_photo_thumb_url=ensure_site_photo_thumbnail(
                     project_id=p.id,
@@ -268,6 +434,7 @@ def get_project(project_id: int, db: Session = Depends(get_db)) -> ProjectDetail
     return ProjectDetail(
         id=project.id,
         address=project.address,
+        **_project_space_fields(project),
         lot_size_sqft=project.lot_size_sqft,
         house_sqft=project.house_sqft,
         site_photo_url=f"/images/{project.id}/site_photo.jpg" if project.site_photo_path else None,
@@ -328,10 +495,13 @@ async def create_design_request(
 
     image_b64 = base64.b64encode(input_image_bytes).decode()
 
+    image_model = body.image_model or default_model_for(provider.value)
+
     dr = DesignRequest(
         project_id=project_id,
         parent_render_id=body.parent_render_id,
         image_provider=body.image_provider,
+        image_model=image_model,
         feature_categories=body.feature_categories,
         style=body.style,
         quality_tier=body.quality_tier,
@@ -341,8 +511,10 @@ async def create_design_request(
     db.flush()
 
     try:
-        adapter = provider.make_adapter()
-        render_bytes_list = await adapter.generate(image_b64, body.composed_prompt)
+        adapter = provider.make_adapter(model=image_model)
+        render_bytes_list = await adapter.generate(
+            image_b64, body.composed_prompt, space=_project_space(project)
+        )
     except MissingApiKeyError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc))
@@ -357,10 +529,12 @@ async def create_design_request(
         detail = f"Image provider failed: {exc.__class__.__name__}: {exc}"
         status_code = _provider_error_status(exc)
         logger.warning(
-            "Image provider request failed; returning HTTP %s for project_id=%s provider=%s",
+            "Image provider request failed; returning HTTP %s for project_id=%s "
+            "provider=%s model=%s",
             status_code,
             project_id,
             body.image_provider,
+            image_model,
         )
         raise HTTPException(status_code=status_code, detail=detail)
 
@@ -390,6 +564,7 @@ async def create_design_request(
         "project_id": dr.project_id,
         "parent_render_id": dr.parent_render_id,
         "image_provider": dr.image_provider,
+        "image_model": dr.image_model,
         "feature_categories": dr.feature_categories,
         "style": dr.style,
         "quality_tier": dr.quality_tier,
@@ -466,8 +641,15 @@ def get_render_image(render_id: int, db: Session = Depends(get_db)) -> FileRespo
 @app.post("/api/renders/{render_id}/dimension-defaults", status_code=200)
 async def get_dimension_defaults(
     render_id: int,
+    body: DimensionDefaultsRequest | None = Body(None),
     db: Session = Depends(get_db),
 ) -> dict:
+    """Suggest dimensions for the render's features.
+
+    Uses the requested materials provider when its key is set, otherwise the first text
+    vendor with a key (Anthropic, then OpenAI, then Google), so the panel still auto-fills
+    when one vendor is not configured.
+    """
     render = db.get(Render, render_id)
     if render is None:
         raise HTTPException(status_code=404, detail="Render not found")
@@ -488,6 +670,8 @@ async def get_dimension_defaults(
     project = dr.project
     lot_size_sqft = project.lot_size_sqft if project is not None else None
     house_sqft = project.house_sqft if project is not None else None
+    space = _project_space(project)
+    space_details = project.space_details if project is not None else None
 
     image_path = Path(render.image_path)
     if not image_path.exists():
@@ -500,9 +684,23 @@ async def get_dimension_defaults(
             feature_categories=feature_categories,
             lot_size_sqft=lot_size_sqft,
             house_sqft=house_sqft,
+            materials_llm=body.materials_llm if body else None,
+            model=body.materials_model if body else None,
+            space=space,
+            space_details=space_details,
         )
     except MissingApiKeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        detail = f"Dimension suggestions failed: {exc.__class__.__name__}: {exc}"
+        status_code = _provider_error_status(exc)
+        logger.warning(
+            "Dimension suggestion failed; returning HTTP %s for render_id=%s: %s",
+            status_code,
+            render_id,
+            detail,
+        )
+        raise HTTPException(status_code=status_code, detail=detail)
 
     return defaults
 
@@ -528,26 +726,56 @@ async def create_build_sheet(
 
     dr = render.design_request
     feature_categories: list[str] = dr.feature_categories
+    project = dr.project
+    space = _project_space(project)
+    room_type = project.room_type if project is not None else None
 
     image_path = Path(render.image_path)
     if not image_path.exists():
         raise HTTPException(status_code=404, detail="Render image file not found on disk")
     render_image_bytes = image_path.read_bytes()
 
+    materials_model = body.materials_model or default_model_for(llm.value)
+    grounding_model = body.grounding_model or default_model_for("perplexity")
+
     try:
-        grounding = SearchGrounding()
+        grounding = SearchGrounding(model=grounding_model, space=space, room_type=room_type)
         search_results = await grounding.search(feature_categories)
     except MissingApiKeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except SearchGroundingError as exc:
+        # Pass the vendor's status and explanation straight through so the UI can say
+        # "rate limited" or "out of credits" instead of an opaque failure.
+        status_code = _grounding_http_status(exc.status_code)
+        logger.warning(
+            "Search grounding rejected; returning HTTP %s for render_id=%s model=%s: %s",
+            status_code,
+            render_id,
+            grounding_model,
+            exc,
+        )
+        raise HTTPException(status_code=status_code, detail=f"Product research failed: {exc}")
+    except Exception as exc:
+        detail = f"Search grounding failed: {exc.__class__.__name__}: {exc}"
+        status_code = _provider_error_status(exc)
+        logger.warning(
+            "Search grounding request failed; returning HTTP %s for render_id=%s model=%s: %s",
+            status_code,
+            render_id,
+            grounding_model,
+            detail,
+        )
+        raise HTTPException(status_code=status_code, detail=detail)
 
     try:
-        adapter = llm.make_adapter()
+        adapter = llm.make_adapter(model=materials_model)
         content = await adapter.generate_build_sheet(
             render_image_bytes=render_image_bytes,
             dimensions=body.dimensions,
             quality_tier=dr.quality_tier,
             search_results=search_results,
             feature_categories=feature_categories,
+            space=space,
         )
     except MissingApiKeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -555,14 +783,16 @@ async def create_build_sheet(
         detail = f"Materials LLM failed: {exc.__class__.__name__}: {exc}"
         status_code = _provider_error_status(exc)
         logger.warning(
-            "Materials LLM request failed; returning HTTP %s for render_id=%s provider=%s",
+            "Materials LLM request failed; returning HTTP %s for render_id=%s "
+            "provider=%s model=%s",
             status_code,
             render_id,
             body.materials_llm,
+            materials_model,
         )
         raise HTTPException(status_code=status_code, detail=detail)
 
-    content = await validate_build_sheet_material_urls(content)
+    content = await validate_build_sheet_material_urls(content, retailers=space.retailers)
 
     # Upsert: delete existing BuildSheet for this render if present, then insert
     existing = db.query(BuildSheet).filter(BuildSheet.render_id == render_id).first()
@@ -573,6 +803,8 @@ async def create_build_sheet(
     bs = BuildSheet(
         render_id=render_id,
         materials_llm=body.materials_llm,
+        materials_model=materials_model,
+        grounding_model=grounding_model,
         content_json=json.dumps(content),
     )
     db.add(bs)

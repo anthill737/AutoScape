@@ -1,74 +1,89 @@
+import asyncio
 import json
 import os
 
 from google import genai
 from google.genai import types
 
-from app.domain.retailers import APPROVED_RETAILER_PROMPT_CONSTRAINT
+from app.domain.spaces import SpaceConfig
 from app.providers.base import MaterialsAdapter, MissingApiKeyError, missing_api_key_message
+from app.providers.build_sheet_schema import (
+    SYSTEM_PROMPT,
+    build_user_message,
+    image_media_type,
+    strip_code_fences,
+    system_prompt_for,
+)
+from app.providers.dimension_defaults import (
+    DIMENSION_SYSTEM_PROMPT,
+    build_dimension_message,
+    parse_dimension_json,
+)
+from app.providers.model_catalog import default_model_for
 
-_MODEL = "gemini-2.5-pro"
+# Default Gemini text model; any generateContent-capable Gemini model can be passed in.
+_MODEL = default_model_for("gemini_pro")
 _MAX_OUTPUT_TOKENS = 16384
 
-_SYSTEM_PROMPT = (
-    """You are a professional landscape contractor and cost estimator.
-Given a rendered design image, project dimensions, quality tier, feature categories,
-and product research data, generate a comprehensive build sheet.
-
-"""
-    + APPROVED_RETAILER_PROMPT_CONSTRAINT
-    + """
-
-Respond with ONLY valid JSON (no markdown, no explanation) matching this exact schema:
-{
-  "material_items": [
-    {
-      "name": "string",
-      "quantity": number,
-      "unit": "string",
-      "unit_cost_range": "string (e.g. '$12 - $15')",
-      "total_cost_range": "string (e.g. '$144 - $180')",
-      "vendor": "string",
-      "product_url": "string (real URL from search results or empty string)",
-      "notes": "string"
-    }
-  ],
-  "tool_list": ["string"],
-  "build_steps": [
-    {
-      "step_number": number,
-      "description": "string",
-      "estimated_time": "string (e.g. '2 hours')",
-      "skill_notes": "string"
-    }
-  ],
-  "total_cost_range": "string (e.g. '$3,500 - $5,200')",
-  "skill_level": "string (Beginner | Intermediate | Advanced)",
-  "assumptions": ["string"]
-}"""
-)
-
-
-def _build_user_message(
-    dimensions: dict,
-    quality_tier: str,
-    search_results: list[dict],
-    feature_categories: list[str],
-) -> str:
-    features_str = ", ".join(feature_categories) if feature_categories else "General landscaping"
-    dims_str = json.dumps(dimensions, indent=2) if dimensions else "{}"
-    search_str = json.dumps(search_results[:25], indent=2) if search_results else "[]"
-    return (
-        f"Feature Categories: {features_str}\n"
-        f"Quality Tier: {quality_tier}\n"
-        f"Project Dimensions:\n{dims_str}\n\n"
-        f"Product Research Data (from Perplexity Search Grounding):\n{search_str}\n\n"
-        "Generate the build sheet JSON based on the rendered design image and the above context."
-    )
+# Kept as module attributes for existing tests / probe scripts.
+_SYSTEM_PROMPT = SYSTEM_PROMPT
+_build_user_message = build_user_message
+_normalize_json_response = strip_code_fences
 
 
 class GeminiProAdapter(MaterialsAdapter):
-    """Materials LLM adapter for Google gemini-2.5-pro."""
+    """Materials LLM adapter for Google Gemini text models."""
+
+    def __init__(self, model: str | None = None) -> None:
+        self.model = model or _MODEL
+
+    async def suggest_dimension_defaults(
+        self,
+        render_image_bytes: bytes,
+        feature_categories: list[str],
+        lot_size_sqft: float | None,
+        house_sqft: float | None,
+        space: SpaceConfig | None = None,
+        space_details: dict | None = None,
+    ) -> dict[str, str]:
+        api_key = os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            raise MissingApiKeyError(
+                missing_api_key_message("GOOGLE_API_KEY", "dimension defaults")
+            )
+
+        client = genai.Client(api_key=api_key)
+        user_text = build_dimension_message(
+            feature_categories, lot_size_sqft, house_sqft, space=space, space_details=space_details
+        )
+        loop = asyncio.get_running_loop()
+        raw = await loop.run_in_executor(
+            None,
+            lambda: _extract_response_text(
+                client.models.generate_content(
+                    model=self.model,
+                    contents=[
+                        types.Content(
+                            parts=[
+                                types.Part(
+                                    inline_data=types.Blob(
+                                        mime_type=image_media_type(render_image_bytes),
+                                        data=render_image_bytes,
+                                    )
+                                ),
+                                types.Part(text=user_text),
+                            ]
+                        )
+                    ],
+                    config=types.GenerateContentConfig(
+                        system_instruction=DIMENSION_SYSTEM_PROMPT,
+                        response_mime_type="application/json",
+                        max_output_tokens=4096,
+                    ),
+                )
+            ),
+        )
+        return parse_dimension_json(raw)
 
     async def generate_build_sheet(
         self,
@@ -77,6 +92,7 @@ class GeminiProAdapter(MaterialsAdapter):
         quality_tier: str,
         search_results: list[dict],
         feature_categories: list[str],
+        space: SpaceConfig | None = None,
     ) -> dict:
         api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
@@ -84,34 +100,52 @@ class GeminiProAdapter(MaterialsAdapter):
                 missing_api_key_message("GOOGLE_API_KEY", "the GeminiPro materials provider")
             )
 
-        user_text = _build_user_message(
-            dimensions, quality_tier, search_results, feature_categories
+        user_text = build_user_message(
+            dimensions, quality_tier, search_results, feature_categories, space=space
         )
 
         client = genai.Client(api_key=api_key)
-        response = await _call_gemini_pro(client, render_image_bytes, user_text)
-        return json.loads(_normalize_json_response(response))
+        response = await _call_gemini_pro(
+            client,
+            render_image_bytes,
+            user_text,
+            self.model,
+            system_prompt=system_prompt_for(space),
+        )
+        return json.loads(strip_code_fences(response))
 
 
-async def _call_gemini_pro(client: genai.Client, render_image_bytes: bytes, user_text: str) -> str:
-    import asyncio
-
-    loop = asyncio.get_event_loop()
+async def _call_gemini_pro(
+    client: genai.Client,
+    render_image_bytes: bytes,
+    user_text: str,
+    model: str = _MODEL,
+    system_prompt: str = SYSTEM_PROMPT,
+) -> str:
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
-        lambda: _call_gemini_pro_sync(client, render_image_bytes, user_text),
+        lambda: _call_gemini_pro_sync(
+            client, render_image_bytes, user_text, model, system_prompt=system_prompt
+        ),
     )
 
 
-def _call_gemini_pro_sync(client: genai.Client, render_image_bytes: bytes, user_text: str) -> str:
+def _call_gemini_pro_sync(
+    client: genai.Client,
+    render_image_bytes: bytes,
+    user_text: str,
+    model: str = _MODEL,
+    system_prompt: str = SYSTEM_PROMPT,
+) -> str:
     response = client.models.generate_content(
-        model=_MODEL,
+        model=model,
         contents=[
             types.Content(
                 parts=[
                     types.Part(
                         inline_data=types.Blob(
-                            mime_type="image/jpeg",
+                            mime_type=image_media_type(render_image_bytes),
                             data=render_image_bytes,
                         )
                     ),
@@ -120,7 +154,7 @@ def _call_gemini_pro_sync(client: genai.Client, render_image_bytes: bytes, user_
             )
         ],
         config=types.GenerateContentConfig(
-            system_instruction=_SYSTEM_PROMPT,
+            system_instruction=system_prompt,
             response_mime_type="application/json",
             max_output_tokens=_MAX_OUTPUT_TOKENS,
         ),
@@ -151,16 +185,3 @@ def _extract_response_text(response) -> str:
     ]
     reason = f" finish_reason={', '.join(finish_reasons)}" if finish_reasons else ""
     raise ValueError(f"GeminiPro returned no text content.{reason}")
-
-
-def _normalize_json_response(response_text: str) -> str:
-    stripped = response_text.strip()
-    if not stripped.startswith("```"):
-        return stripped
-
-    lines = stripped.splitlines()
-    if lines and lines[0].strip().startswith("```"):
-        lines = lines[1:]
-    if lines and lines[-1].strip() == "```":
-        lines = lines[:-1]
-    return "\n".join(lines).strip()

@@ -1,27 +1,41 @@
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { getProject, ProjectDetail } from "../api/projects";
 import { ApiError } from "../api/errors";
+import { findProvider, ModelCatalog, ProviderModels } from "../api/models";
 import {
   IMAGE_PROVIDERS,
-  FEATURE_CATEGORIES,
-  STYLES,
-  QUALITY_TIERS,
   MATERIALS_LLMS,
+  DEFAULT_MATERIALS_LLM,
   DesignRequestOut,
   RenderOut,
   BuildSheetOut,
   MaterialItem,
   BuildStep,
-  seedComposedPrompt,
   createDesignRequest,
   chooseRender,
   getDimensionDefaults,
-  getDimensionFieldsForCategories,
   getBuildSheet,
   createBuildSheet,
 } from "../api/designRequests";
+import {
+  EXTERIOR_SPACE,
+  dimensionFieldsFor,
+  findSpace,
+  seedPromptFor,
+  spaceLabelFor,
+  type SpaceConfig,
+} from "../api/spaces";
+import { useSpaces } from "../hooks/useSpaces";
 import { exportBuildSheet } from "../utils/exportBuildSheet";
+import {
+  loadModelSelection,
+  resolveSelectedModel,
+  saveModelSelection,
+} from "../utils/modelSelection";
+import { useModelCatalog } from "../hooks/useModelCatalog";
+import ModelPicker from "../components/ModelPicker";
+import DesignRequestForm, { type IterationSource } from "../components/DesignRequestForm";
 import TopNav from "../components/TopNav";
 
 function sortDesignRequestsNewestFirst(
@@ -35,6 +49,20 @@ function sortDesignRequestsNewestFirst(
 
 function formatImageProvider(value: string): string {
   return IMAGE_PROVIDERS.find((provider) => provider.value === value)?.label ?? value;
+}
+
+/** "Google Gemini Images (gemini-3.1-flash-image)" when the model is known. */
+function formatImageProviderWithModel(dr: DesignRequestOut): string {
+  const label = formatImageProvider(dr.image_provider);
+  return dr.image_model ? `${label} (${dr.image_model})` : label;
+}
+
+function isKnownImageProvider(value: string | undefined): value is string {
+  return !!value && IMAGE_PROVIDERS.some((provider) => provider.value === value);
+}
+
+function isKnownMaterialsLlm(value: string | undefined): value is string {
+  return !!value && MATERIALS_LLMS.some((llm) => llm.value === value);
 }
 
 function formatSubmittedTimestamp(value: string): string {
@@ -159,7 +187,7 @@ function getHeroLabel(context: ActiveRenderContext): string {
     context.dr.style,
     context.dr.quality_tier,
     formatFeatureCategories(context.dr.feature_categories),
-    formatImageProvider(context.dr.image_provider),
+    formatImageProviderWithModel(context.dr),
   ].join(" · ");
 }
 
@@ -188,13 +216,39 @@ export default function ProjectDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Space config (outdoor vs interior vocabulary) for this project
+  const { spaces } = useSpaces();
+  const space: SpaceConfig = findSpace(spaces, project?.space_type);
+  const roomType: string | null = project?.room_type ?? null;
+
+  // Model catalog (what each vendor currently offers) + remembered choices
+  const { catalog: modelCatalog, loading: modelsLoading } = useModelCatalog();
+  const savedSelectionRef = useRef(loadModelSelection());
+  const savedSelection = savedSelectionRef.current;
+
   // Design Request form state
   const [showForm, setShowForm] = useState(false);
-  const [imageProvider, setImageProvider] = useState<string>(IMAGE_PROVIDERS[0].value);
+  const [imageProvider, setImageProvider] = useState<string>(
+    isKnownImageProvider(savedSelection.imageProvider)
+      ? savedSelection.imageProvider
+      : IMAGE_PROVIDERS[0].value,
+  );
+  // Chosen model per provider slug, so switching providers back and forth keeps each pick.
+  const [imageModels, setImageModels] = useState<Record<string, string>>(
+    savedSelection.imageModels ?? {},
+  );
+  const [materialsModels, setMaterialsModels] = useState<Record<string, string>>(
+    savedSelection.materialsModels ?? {},
+  );
+  const [groundingModel, setGroundingModel] = useState<string>(
+    savedSelection.groundingModel ?? "",
+  );
   const [featureCategories, setFeatureCategories] = useState<string[]>([]);
-  const [style, setStyle] = useState<string>(STYLES[0]);
-  const [qualityTier, setQualityTier] = useState<string>(QUALITY_TIERS[0]);
+  const [style, setStyle] = useState<string>(EXTERIOR_SPACE.styles[0]);
+  const [qualityTier, setQualityTier] = useState<string>(EXTERIOR_SPACE.quality_tiers[0]);
   const [composedPrompt, setComposedPrompt] = useState<string>("");
+  // Once the user edits the prompt we stop rewriting it when chips change.
+  const [promptIsCustom, setPromptIsCustom] = useState(false);
   const [iterationParentRenderId, setIterationParentRenderId] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -205,10 +259,58 @@ export default function ProjectDetailPage() {
     {},
   );
   const [materialsLlmByRender, setMaterialsLlmByRender] = useState<Record<number, string>>({});
+  const defaultMaterialsLlm = isKnownMaterialsLlm(savedSelection.materialsProvider)
+    ? savedSelection.materialsProvider
+    : DEFAULT_MATERIALS_LLM;
+
+  const imageProviderEntry = findProvider(modelCatalog, imageProvider);
+  const imageModel = resolveSelectedModel(imageProviderEntry, imageModels[imageProvider]);
+  const groundingProviderEntry: ProviderModels | undefined = modelCatalog.grounding[0];
+  const resolvedGroundingModel = resolveSelectedModel(groundingProviderEntry, groundingModel);
+
+  function materialsLlmFor(renderId: number): string {
+    return materialsLlmByRender[renderId] ?? defaultMaterialsLlm;
+  }
+
+  function materialsModelFor(llm: string): string {
+    return resolveSelectedModel(findProvider(modelCatalog, llm), materialsModels[llm]);
+  }
+
+  function changeImageProvider(value: string) {
+    setImageProvider(value);
+    saveModelSelection({ imageProvider: value });
+  }
+
+  function changeImageModel(modelId: string) {
+    setImageModels((prev) => ({ ...prev, [imageProvider]: modelId }));
+    saveModelSelection({ imageModels: { [imageProvider]: modelId } });
+  }
+
+  function changeMaterialsLlm(renderId: number, value: string) {
+    setMaterialsLlmByRender((prev) => ({ ...prev, [renderId]: value }));
+    saveModelSelection({ materialsProvider: value });
+  }
+
+  function changeMaterialsModel(llm: string, modelId: string) {
+    setMaterialsModels((prev) => ({ ...prev, [llm]: modelId }));
+    saveModelSelection({ materialsModels: { [llm]: modelId } });
+  }
+
+  function changeGroundingModel(modelId: string) {
+    setGroundingModel(modelId);
+    saveModelSelection({ groundingModel: modelId });
+  }
   const [generatingForRender, setGeneratingForRender] = useState<number | null>(null);
   const [buildSheetErrors, setBuildSheetErrors] = useState<Record<number, string>>({});
   const [buildSheets, setBuildSheets] = useState<Record<number, BuildSheetOut>>({});
   const fetchedDefaultsRef = useRef<Set<number>>(new Set());
+  // Per-render status of the auto-fill call so the panel can say what happened.
+  const [dimensionStatus, setDimensionStatus] = useState<
+    Record<number, { state: "loading" } | { state: "error"; message: string } | { state: "done" }>
+  >({});
+  // Design Request whose renders were just generated in this session (drives the banner).
+  const [justGeneratedRequestId, setJustGeneratedRequestId] = useState<number | null>(null);
+  const heroRef = useRef<HTMLElement | null>(null);
   const fetchedBuildSheetsRef = useRef<Set<number>>(new Set());
   const designRequestFormRef = useRef<HTMLFormElement | null>(null);
   const pendingFormFocusRef = useRef(false);
@@ -255,25 +357,44 @@ export default function ProjectDetailPage() {
     }
   }, [activeRenderId, id, location.pathname, navigate, project, renderId]);
 
+  function loadDimensionDefaults(targetRenderId: number, force = false) {
+    if (!force && fetchedDefaultsRef.current.has(targetRenderId)) return;
+    fetchedDefaultsRef.current.add(targetRenderId);
+    const llm = materialsLlmFor(targetRenderId);
+    setDimensionStatus((prev) => ({ ...prev, [targetRenderId]: { state: "loading" } }));
+    getDimensionDefaults(targetRenderId, {
+      materialsLlm: llm,
+      materialsModel: materialsModelFor(llm) || null,
+    })
+      .then((defaults) => {
+        setDimensionValues((prev) => ({
+          ...prev,
+          [targetRenderId]: {
+            ...Object.fromEntries(Object.entries(defaults).map(([k, v]) => [k, String(v)])),
+            // Never overwrite something the user already typed.
+            ...Object.fromEntries(
+              Object.entries(prev[targetRenderId] ?? {}).filter(([, v]) => v.trim() !== ""),
+            ),
+          },
+        }));
+        setDimensionStatus((prev) => ({ ...prev, [targetRenderId]: { state: "done" } }));
+      })
+      .catch((e: unknown) => {
+        setDimensionStatus((prev) => ({
+          ...prev,
+          [targetRenderId]: {
+            state: "error",
+            message: e instanceof Error ? e.message : "Unknown error",
+          },
+        }));
+      });
+  }
+
   useEffect(() => {
     if (!project || activeRenderId == null || !findRender(project, activeRenderId)) {
       return;
     }
-    if (!fetchedDefaultsRef.current.has(activeRenderId)) {
-      fetchedDefaultsRef.current.add(activeRenderId);
-      getDimensionDefaults(activeRenderId)
-        .then((defaults) => {
-          setDimensionValues((prev) => ({
-            ...prev,
-            [activeRenderId]: Object.fromEntries(
-              Object.entries(defaults).map(([k, v]) => [k, String(v)]),
-            ),
-          }));
-        })
-        .catch(() => {
-          // Leave fields empty; user can fill manually
-        });
-    }
+    loadDimensionDefaults(activeRenderId);
 
     if (!fetchedBuildSheetsRef.current.has(activeRenderId)) {
       fetchedBuildSheetsRef.current.add(activeRenderId);
@@ -293,21 +414,7 @@ export default function ProjectDetailPage() {
     if (!project) return;
     for (const dr of project.design_requests) {
       const chosen = dr.renders.find((r) => r.is_chosen);
-      if (chosen && !fetchedDefaultsRef.current.has(chosen.id)) {
-        fetchedDefaultsRef.current.add(chosen.id);
-        getDimensionDefaults(chosen.id)
-          .then((defaults) => {
-            setDimensionValues((prev) => ({
-              ...prev,
-              [chosen.id]: Object.fromEntries(
-                Object.entries(defaults).map(([k, v]) => [k, String(v)]),
-              ),
-            }));
-          })
-          .catch(() => {
-            // Leave fields empty; user can fill manually
-          });
-      }
+      if (chosen) loadDimensionDefaults(chosen.id);
     }
   }, [project]);
 
@@ -330,12 +437,20 @@ export default function ProjectDetailPage() {
     }
   }, [project]);
 
-  // Re-seed composed prompt on picker changes, but only for new (non-iteration) requests
   useEffect(() => {
-    if (iterationParentRenderId === null) {
-      setComposedPrompt(seedComposedPrompt(featureCategories, style, qualityTier));
+    if (!space.styles.includes(style)) setStyle(space.styles[0]);
+    if (!space.quality_tiers.includes(qualityTier)) setQualityTier(space.quality_tiers[0]);
+    setFeatureCategories((prev) => prev.filter((c) => space.feature_categories.includes(c)));
+    // Only react to the space itself changing (project load); the guards above are cheap.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [space.id]);
+
+  // Re-seed the prompt when chips change, unless the user has taken over the text.
+  useEffect(() => {
+    if (!promptIsCustom) {
+      setComposedPrompt(seedPromptFor(space, roomType, featureCategories, style, qualityTier));
     }
-  }, [featureCategories, style, qualityTier, iterationParentRenderId]);
+  }, [featureCategories, style, qualityTier, promptIsCustom, space, roomType]);
 
   useEffect(() => {
     if (!showForm || !pendingFormFocusRef.current) return;
@@ -350,7 +465,8 @@ export default function ProjectDetailPage() {
 
   function openForm() {
     setIterationParentRenderId(null);
-    setComposedPrompt(seedComposedPrompt(featureCategories, style, qualityTier));
+    setPromptIsCustom(false);
+    setComposedPrompt(seedPromptFor(space, roomType, featureCategories, style, qualityTier));
     setSubmitError(null);
     setSubmitWarning(null);
     pendingFormFocusRef.current = true;
@@ -358,11 +474,18 @@ export default function ProjectDetailPage() {
   }
 
   function openIterateForm(render: RenderOut, dr: DesignRequestOut) {
-    setImageProvider(dr.image_provider);
+    if (isKnownImageProvider(dr.image_provider)) {
+      setImageProvider(dr.image_provider);
+      if (dr.image_model) {
+        setImageModels((prev) => ({ ...prev, [dr.image_provider]: dr.image_model as string }));
+      }
+    }
     setFeatureCategories([...dr.feature_categories]);
     setStyle(dr.style);
     setQualityTier(dr.quality_tier);
     setIterationParentRenderId(render.id);
+    // The parent's prompt is kept verbatim; treat it as user-owned text.
+    setPromptIsCustom(true);
     setComposedPrompt(dr.composed_prompt);
     setSubmitError(null);
     setSubmitWarning(null);
@@ -379,9 +502,26 @@ export default function ProjectDetailPage() {
     navigate(nextPath, { replace: true });
   }
 
+  function switchToSitePhoto() {
+    setIterationParentRenderId(null);
+    setPromptIsCustom(false);
+    setComposedPrompt(seedPromptFor(space, roomType, featureCategories, style, qualityTier));
+  }
+
+  function editPrompt(value: string) {
+    setPromptIsCustom(true);
+    setComposedPrompt(value);
+  }
+
+  function resetPrompt() {
+    setPromptIsCustom(false);
+    setComposedPrompt(seedPromptFor(space, roomType, featureCategories, style, qualityTier));
+  }
+
   function closeForm() {
     setShowForm(false);
     setIterationParentRenderId(null);
+    setPromptIsCustom(false);
   }
 
   function toggleCategory(cat: string) {
@@ -399,6 +539,7 @@ export default function ProjectDetailPage() {
     try {
       const dr = await createDesignRequest(Number(id), {
         image_provider: imageProvider,
+        image_model: imageModel || null,
         feature_categories: featureCategories,
         style,
         quality_tier: qualityTier,
@@ -408,7 +549,14 @@ export default function ProjectDetailPage() {
       setProject((prev) =>
         prev ? { ...prev, design_requests: [...prev.design_requests, dr] } : prev,
       );
+      setJustGeneratedRequestId(dr.id);
       closeForm();
+      window.setTimeout(() => {
+        const hero = heroRef.current;
+        if (hero && typeof hero.scrollIntoView === "function") {
+          hero.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      }, 0);
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : "Unknown error";
       if (e instanceof ApiError && e.status === 429) {
@@ -448,7 +596,7 @@ export default function ProjectDetailPage() {
   }
 
   async function handleGenerateBuildSheet(renderId: number) {
-    const llm = materialsLlmByRender[renderId] ?? "claude_sonnet";
+    const llm = materialsLlmFor(renderId);
     const dims = dimensionValues[renderId] ?? {};
     setGeneratingForRender(renderId);
     setBuildSheetErrors((prev) => {
@@ -457,7 +605,10 @@ export default function ProjectDetailPage() {
       return next;
     });
     try {
-      const bs = await createBuildSheet(renderId, llm, dims);
+      const bs = await createBuildSheet(renderId, llm, dims, {
+        materialsModel: materialsModelFor(llm) || null,
+        groundingModel: resolvedGroundingModel || null,
+      });
       setBuildSheets((prev) => ({ ...prev, [renderId]: bs }));
     } catch (e: unknown) {
       setBuildSheetErrors((prev) => ({
@@ -491,6 +642,17 @@ export default function ProjectDetailPage() {
     project != null ? getDesignRequestNumberMap(project.design_requests) : new Map<number, number>();
   const designRequestsNewestFirst =
     project != null ? sortDesignRequestsNewestFirst(project.design_requests) : [];
+  const iterationSource: IterationSource | null = (() => {
+    if (!project || iterationParentRenderId == null) return null;
+    const ctx = findActiveRenderContext(project, iterationParentRenderId);
+    if (!ctx) return null;
+    return {
+      render: ctx.render,
+      dr: ctx.dr,
+      positionLabel: `${ctx.requestNumber}.${ctx.renderNumber}`,
+      requestNumber: ctx.requestNumber,
+    };
+  })();
 
   useEffect(() => {
     if (!activeContext) return;
@@ -516,34 +678,80 @@ export default function ProjectDetailPage() {
 
   return (
     <div className="min-h-screen bg-surface text-foreground">
-      <TopNav title={project ? project.address : "Loading..."} />
+      <TopNav
+        title={project ? project.address : "Loading..."}
+        crumb={{ label: "Projects", to: "/" }}
+      />
 
-      <main className="mx-auto max-w-none px-4 py-6">
+      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
         {loading && <p className="text-muted">Loading project…</p>}
-        {error && <p className="text-danger">{error}</p>}
+        {error && <p className="alert-danger">{error}</p>}
 
         {project && (
           <>
-            <ProjectHeaderStrip
+            <ProjectSummary
               project={project}
-              imageProvider={imageProvider}
-              featureCategories={featureCategories}
-              style={style}
-              qualityTier={qualityTier}
-              onImageProviderChange={setImageProvider}
-              onToggleCategory={toggleCategory}
-              onStyleChange={setStyle}
-              onQualityTierChange={setQualityTier}
+              space={space}
+              showNewRequestButton={!showForm}
+              onNewRequest={openForm}
             />
+
+            <ProgressStepper
+              project={project}
+              buildSheets={buildSheets}
+              activeRenderId={activeRenderId}
+              formOpen={showForm}
+            />
+
+            {showForm && (
+              <DesignRequestForm
+                formRef={designRequestFormRef}
+                space={space}
+                roomType={roomType}
+                sitePhotoUrl={project.site_photo_url}
+                iterationSource={iterationSource}
+                featureCategories={featureCategories}
+                style={style}
+                qualityTier={qualityTier}
+                composedPrompt={composedPrompt}
+                promptIsCustom={promptIsCustom}
+                imageProvider={imageProvider}
+                imageProviderEntry={imageProviderEntry}
+                imageModel={imageModel}
+                modelsLoading={modelsLoading}
+                submitting={submitting}
+                submitError={submitError}
+                submitWarning={submitWarning}
+                onToggleCategory={toggleCategory}
+                onStyleChange={setStyle}
+                onQualityTierChange={setQualityTier}
+                onPromptChange={editPrompt}
+                onResetPrompt={resetPrompt}
+                onImageProviderChange={changeImageProvider}
+                onImageModelChange={changeImageModel}
+                onUseSitePhoto={switchToSitePhoto}
+                onSubmit={handleSubmit}
+                onCancel={closeForm}
+              />
+            )}
 
             {activeContext && (
               <HeroSection
+                ref={heroRef}
+                space={space}
                 context={activeContext}
+                isNewRequest={justGeneratedRequestId === activeContext.dr.id}
+                onDismissNew={() => setJustGeneratedRequestId(null)}
+                onActivateRender={activateRender}
+                dimensionStatus={dimensionStatus[activeContext.render.id] ?? null}
+                onRetryDimensions={() => loadDimensionDefaults(activeContext.render.id, true)}
                 buildSheet={buildSheets[activeContext.render.id] ?? null}
                 dimensionValues={dimensionValues[activeContext.render.id] ?? {}}
-                materialsLlm={
-                  materialsLlmByRender[activeContext.render.id] ?? "claude_sonnet"
-                }
+                materialsLlm={materialsLlmFor(activeContext.render.id)}
+                materialsModel={materialsModelFor(materialsLlmFor(activeContext.render.id))}
+                groundingModel={resolvedGroundingModel}
+                modelCatalog={modelCatalog}
+                modelsLoading={modelsLoading}
                 generating={generatingForRender === activeContext.render.id}
                 error={buildSheetErrors[activeContext.render.id] ?? null}
                 onChoose={() =>
@@ -561,12 +769,11 @@ export default function ProjectDetailPage() {
                     },
                   }))
                 }
-                onLlmChange={(value) =>
-                  setMaterialsLlmByRender((prev) => ({
-                    ...prev,
-                    [activeContext.render.id]: value,
-                  }))
+                onLlmChange={(value) => changeMaterialsLlm(activeContext.render.id, value)}
+                onMaterialsModelChange={(modelId) =>
+                  changeMaterialsModel(materialsLlmFor(activeContext.render.id), modelId)
                 }
+                onGroundingModelChange={changeGroundingModel}
                 onGenerateBuildSheet={() =>
                   handleGenerateBuildSheet(activeContext.render.id)
                 }
@@ -577,91 +784,26 @@ export default function ProjectDetailPage() {
             )}
 
             {/* Design Tree section */}
-            <section aria-label="Design Tree">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-xl font-semibold text-foreground">
-                  Design Tree
-                </h2>
-                  {!showForm && (
-                  <button
-                    onClick={openForm}
-                    className="bg-accent text-accent-foreground px-4 py-2 rounded hover:opacity-90"
-                  >
-                    New Design Request
-                  </button>
-                )}
+            <section aria-label="Design Tree" className="mt-10">
+              <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
+                <div>
+                  <p className="as-eyebrow">History</p>
+                  <h2 className="text-xl font-semibold tracking-tight text-foreground">
+                    Design Tree
+                  </h2>
+                </div>
+                <p className="as-help">
+                  Every request and its three renders. Click a thumbnail to view it above.
+                </p>
               </div>
 
-              {/* Design Request form (new or iteration) */}
-              {showForm && (
-                <form
-                  id="design-request-form"
-                  ref={designRequestFormRef}
-                  onSubmit={handleSubmit}
-                  className="bg-surface-elevated rounded border border-default shadow p-6 mb-6 space-y-5"
-                  tabIndex={-1}
-                >
-                  <h3 className="text-lg font-semibold">
-                    {iterationParentRenderId != null
-                      ? `Iterate on Render #${iterationParentRenderId}`
-                      : "New Design Request"}
-                  </h3>
-
-                  {iterationParentRenderId != null && (
-                    <input
-                      type="hidden"
-                      name="parent_render_id"
-                      value={iterationParentRenderId}
-                    />
-                  )}
-
-                  <div>
-                    <label className="block font-medium text-foreground mb-1">
-                      Composed Prompt
-                    </label>
-                    <textarea
-                      value={composedPrompt}
-                      onChange={(e) => setComposedPrompt(e.target.value)}
-                      rows={3}
-                      className="w-full rounded border border-default bg-surface-elevated px-3 py-2 text-foreground focus:outline-none focus:ring-2 focus:ring-accent"
-                    />
-                  </div>
-
-                  {submitWarning && (
-                    <div className="rounded border border-danger bg-surface-elevated px-3 py-2 text-sm text-danger">
-                      {submitWarning}
-                    </div>
-                  )}
-
-                  {submitError && (
-                    <p className="text-danger text-sm">{submitError}</p>
-                  )}
-
-                  <div className="flex gap-3">
-                    <button
-                      type="submit"
-                      disabled={submitting}
-                      className="bg-accent text-accent-foreground px-5 py-2 rounded hover:opacity-90 disabled:opacity-50"
-                    >
-                      {submitting ? "Generating…" : "Generate Renders"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={closeForm}
-                      disabled={submitting}
-                      className="bg-surface text-foreground border border-default px-5 py-2 rounded hover:border-accent disabled:opacity-50"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </form>
-              )}
-
               {project.design_requests.length === 0 && !showForm && (
-                <p className="text-muted">
-                  No design requests yet. Click "New Design Request" to get
-                  started.
-                </p>
+                <div className="as-card px-6 py-10 text-center">
+                  <p className="text-base font-semibold text-foreground">No design requests yet.</p>
+                  <p className="as-help mt-1">
+                    Click "New Design Request" above to generate your first three renders.
+                  </p>
+                </div>
               )}
 
               <div className="max-h-[75vh] space-y-4 overflow-y-auto pr-1">
@@ -690,36 +832,70 @@ export default function ProjectDetailPage() {
   );
 }
 
+type DimensionStatus =
+  | { state: "loading" }
+  | { state: "error"; message: string }
+  | { state: "done" }
+  | null;
+
 interface HeroSectionProps {
+  space: SpaceConfig;
   context: ActiveRenderContext;
+  isNewRequest: boolean;
+  onDismissNew: () => void;
+  onActivateRender: (renderId: number) => void;
+  dimensionStatus: DimensionStatus;
+  onRetryDimensions: () => void;
   buildSheet: BuildSheetOut | null;
   dimensionValues: Record<string, string>;
   materialsLlm: string;
+  materialsModel: string;
+  groundingModel: string;
+  modelCatalog: ModelCatalog;
+  modelsLoading: boolean;
   generating: boolean;
   error: string | null;
   onChoose: () => void;
   onIterate: () => void;
   onDimensionChange: (key: string, value: string) => void;
   onLlmChange: (value: string) => void;
+  onMaterialsModelChange: (modelId: string) => void;
+  onGroundingModelChange: (modelId: string) => void;
   onGenerateBuildSheet: () => void;
   onRegenerate: () => void;
 }
 
-function HeroSection({
+const HeroSection = forwardRef<HTMLElement, HeroSectionProps>(function HeroSection(
+  {
+  space,
   context,
+  isNewRequest,
+  onDismissNew,
+  onActivateRender,
+  dimensionStatus,
+  onRetryDimensions,
   buildSheet,
   dimensionValues,
   materialsLlm,
+  materialsModel,
+  groundingModel,
+  modelCatalog,
+  modelsLoading,
   generating,
   error,
   onChoose,
   onIterate,
   onDimensionChange,
   onLlmChange,
+  onMaterialsModelChange,
+  onGroundingModelChange,
   onGenerateBuildSheet,
   onRegenerate,
-}: HeroSectionProps) {
+  },
+  ref,
+) {
   const [imageLoaded, setImageLoaded] = useState(false);
+  const imgRef = useRef<HTMLImageElement | null>(null);
   const [imageFailed, setImageFailed] = useState(false);
   const [retryNonce, setRetryNonce] = useState(0);
   const retryCountRef = useRef(0);
@@ -738,6 +914,11 @@ function HeroSection({
     setImageFailed(false);
     setRetryNonce(0);
     retryCountRef.current = 0;
+    // A cached image can finish before onLoad is wired up; check it directly.
+    const img = imgRef.current;
+    if (img && img.complete && img.naturalWidth > 0) {
+      setImageLoaded(true);
+    }
   }, [context.render.id, imageUrl]);
 
   function handleImageError() {
@@ -768,27 +949,51 @@ function HeroSection({
   }
 
   return (
-    <section aria-label="Active render hero" className="mb-8">
+    <section ref={ref} aria-label="Active render hero" className="mb-8 scroll-mt-4">
+      {isNewRequest && (
+        <div
+          role="status"
+          className="alert-info mb-3 flex flex-wrap items-center justify-between gap-3 px-4 py-3"
+        >
+          <p className="text-foreground">
+            <span className="font-semibold">
+              {context.dr.renders.length} new renders from Design Request #{context.requestNumber}.
+            </span>{" "}
+            You are viewing {context.requestNumber}.{context.renderNumber}. Click a thumbnail
+            below the image to compare, then choose the one you like.
+          </p>
+          <button
+            type="button"
+            onClick={onDismissNew}
+            className="text-xs font-medium text-muted hover:text-foreground"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <p className="text-sm font-semibold text-foreground">
           {getRenderBreadcrumb(context)}
         </p>
         {context.render.is_chosen && (
-          <span className="rounded-full bg-accent px-2.5 py-1 text-xs font-semibold text-accent-foreground shadow-sm">
-            Chosen
-          </span>
+          <span className="pill-accent">Chosen</span>
         )}
       </div>
 
       <div className="grid items-start gap-6 lg:grid-cols-[minmax(60vw,1fr)_minmax(320px,380px)]">
-        <div className="flex h-[62vh] min-h-[520px] items-center justify-center overflow-hidden rounded border border-default bg-surface shadow-sm max-lg:h-[52vh] max-lg:min-h-[360px] lg:min-w-[60vw]">
+        <div className="min-w-0">
+          <div className="flex h-[62vh] min-h-[520px] items-center justify-center overflow-hidden rounded-2xl border border-default bg-surface-sunken shadow-card max-lg:h-[52vh] max-lg:min-h-[360px] lg:min-w-[60vw]">
           {imageUrl ? (
             <div className="relative h-full w-full">
               {!imageLoaded && !imageFailed && (
                 <div
                   aria-label="Loading active render"
-                  className="absolute inset-0 animate-pulse bg-gradient-to-r from-surface via-surface-elevated to-surface"
-                />
+                  className="absolute inset-0 flex items-center justify-center bg-surface-elevated"
+                >
+                  <span className="animate-pulse rounded-full border border-default px-3 py-1 text-xs font-medium text-muted">
+                    Loading render…
+                  </span>
+                </div>
               )}
               {imageFailed ? (
                 <div className="flex h-full w-full flex-col items-center justify-center gap-3 text-center">
@@ -796,7 +1001,7 @@ function HeroSection({
                   <button
                     type="button"
                     onClick={handleManualRetry}
-                    className="rounded-lg border border-default px-4 py-2 text-sm font-semibold text-accent transition hover:border-accent"
+                    className="btn-secondary text-accent"
                   >
                     Retry
                   </button>
@@ -804,11 +1009,12 @@ function HeroSection({
               ) : (
                 <img
                   key={`${context.render.id}-${retryNonce}`}
+                  ref={imgRef}
                   src={displayedImageUrl ?? undefined}
                   alt="Active render preview"
                   onLoad={() => setImageLoaded(true)}
                   onError={handleImageError}
-                  className={`h-full w-full object-contain transition-opacity duration-150 ${
+                  className={`relative h-full w-full object-contain transition-opacity duration-150 ${
                     imageLoaded ? "opacity-100" : "opacity-0"
                   }`}
                 />
@@ -819,30 +1025,78 @@ function HeroSection({
               No render image available
             </div>
           )}
+          </div>
+
+          {context.dr.renders.length > 1 && (
+            <nav
+              aria-label="Renders in this design request"
+              className="mt-3 flex flex-wrap gap-3"
+            >
+              {context.dr.renders.map((sibling, index) => {
+                const label = `${context.requestNumber}.${index + 1}`;
+                const isCurrent = sibling.id === context.render.id;
+                return (
+                  <button
+                    key={sibling.id}
+                    type="button"
+                    onClick={() => onActivateRender(sibling.id)}
+                    aria-current={isCurrent ? "true" : undefined}
+                    aria-label={`View Render ${label}${sibling.is_chosen ? " (chosen)" : ""}`}
+                    className={`relative h-20 w-28 overflow-hidden rounded border-2 bg-surface transition ${
+                      isCurrent
+                        ? "border-accent ring-2 ring-accent-soft"
+                        : "border-default hover:border-accent"
+                    }`}
+                  >
+                    {sibling.image_url && (
+                      <img
+                        src={sibling.image_url}
+                        alt=""
+                        className="h-full w-full object-cover"
+                      />
+                    )}
+                    <span className="absolute bottom-1 left-1 rounded bg-surface-elevated/90 px-1.5 py-0.5 text-[11px] font-semibold text-foreground">
+                      {label}
+                    </span>
+                    {sibling.is_chosen && (
+                      <span
+                        aria-hidden="true"
+                        title="Chosen render"
+                        className="absolute right-1 top-1 rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-bold text-accent-foreground"
+                      >
+                        ✓
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </nav>
+          )}
         </div>
 
-        <aside className="rounded border border-default bg-surface-elevated p-4 shadow-sm">
-          <div className="mb-4 space-y-2">
-            <p className="text-xs font-semibold uppercase text-muted">
-              Active Render
-            </p>
-            <p className="text-sm font-medium text-foreground">
-              {getHeroLabel(context)}
-            </p>
-            <div className="flex flex-wrap gap-2">
+        <aside className="as-card p-5">
+          <div className="space-y-4">
+            <div>
+              <p className="as-eyebrow">Active Render</p>
+              <p className="mt-1 text-sm font-medium text-foreground">
+                {getHeroLabel(context)}
+              </p>
+            </div>
+            <div className="as-well p-3 text-xs text-muted">
+              {context.render.is_chosen
+                ? "This is the chosen render. Set up its build sheet below, or iterate to refine it."
+                : "Like this one? Choose it to unlock the build sheet, or iterate to refine it."}
+            </div>
+            <div className="flex flex-col gap-2">
               <button
                 type="button"
                 onClick={onChoose}
                 disabled={context.render.is_chosen}
-                className="rounded bg-accent px-4 py-2 text-sm font-semibold text-accent-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:bg-border disabled:text-muted"
+                className="btn-primary w-full"
               >
                 Choose this Render
               </button>
-              <button
-                type="button"
-                onClick={onIterate}
-                className="rounded border border-default bg-surface-elevated px-4 py-2 text-sm font-semibold text-foreground hover:border-accent hover:text-accent"
-              >
+              <button type="button" onClick={onIterate} className="btn-secondary w-full">
                 Iterate from this Render
               </button>
               {context.render.is_chosen && (
@@ -851,53 +1105,57 @@ function HeroSection({
                   onClick={() => {
                     window.setTimeout(focusBuildSheetArea, 0);
                   }}
-                  className="rounded border border-accent bg-surface px-4 py-2 text-sm font-semibold text-accent hover:bg-surface-elevated"
+                  className="btn-secondary w-full border-accent text-accent"
                 >
                   Build Sheet
                 </a>
               )}
               {imageUrl && (
-                <a
-                  href={imageUrl}
-                  download
-                  className="rounded border border-default bg-surface-elevated px-4 py-2 text-sm font-semibold text-foreground hover:border-accent hover:text-accent"
-                >
+                <a href={imageUrl} download className="btn-ghost w-full">
                   Download image
                 </a>
               )}
             </div>
           </div>
-
-          <ProjectDimensionsPanel
-            dr={context.dr}
-            chosenRenderId={context.render.id}
-            dimensionValues={dimensionValues}
-            materialsLlm={materialsLlm}
-            generating={generating}
-            error={error}
-            buildSheet={buildSheet}
-            onDimensionChange={onDimensionChange}
-            onLlmChange={onLlmChange}
-            onGenerate={onGenerateBuildSheet}
-          />
         </aside>
       </div>
+
+      <ProjectDimensionsPanel
+        space={space}
+        dr={context.dr}
+        chosenRenderId={context.render.id}
+        dimensionStatus={dimensionStatus}
+        onRetryDimensions={onRetryDimensions}
+        dimensionValues={dimensionValues}
+        materialsLlm={materialsLlm}
+        materialsModel={materialsModel}
+        groundingModel={groundingModel}
+        modelCatalog={modelCatalog}
+        modelsLoading={modelsLoading}
+        generating={generating}
+        error={error}
+        buildSheet={buildSheet}
+        onDimensionChange={onDimensionChange}
+        onLlmChange={onLlmChange}
+        onMaterialsModelChange={onMaterialsModelChange}
+        onGroundingModelChange={onGroundingModelChange}
+        onGenerate={onGenerateBuildSheet}
+      />
 
       {buildSheet && (
         <div
           id={`build-sheet-render-${context.render.id}`}
           tabIndex={-1}
-          className="mt-12 scroll-mt-6 border-t border-default pt-10 focus:outline-none"
+          className="as-card mt-10 scroll-mt-6 p-5 focus:outline-none sm:p-8"
         >
           <div className="mb-6 flex flex-wrap items-baseline justify-between gap-3">
-            <h2 className="text-2xl font-bold tracking-tight text-foreground">Build Sheet</h2>
+            <div>
+              <p className="as-eyebrow">Step 4</p>
+              <h2 className="text-2xl font-bold tracking-tight text-foreground">Build Sheet</h2>
+            </div>
             <div className="flex items-center gap-3">
               <p className="text-sm text-muted">{getHeroLabel(context)}</p>
-              <button
-                type="button"
-                onClick={onRegenerate}
-                className="rounded-lg border border-default px-3 py-1.5 text-sm font-semibold text-foreground transition hover:border-accent hover:text-accent"
-              >
+              <button type="button" onClick={onRegenerate} className="btn-secondary btn-sm">
                 Regenerate
               </button>
             </div>
@@ -907,177 +1165,126 @@ function HeroSection({
       )}
     </section>
   );
-}
+});
 
-interface ProjectHeaderStripProps {
+interface ProjectSummaryProps {
   project: ProjectDetail;
-  imageProvider: string;
-  featureCategories: string[];
-  style: string;
-  qualityTier: string;
-  onImageProviderChange: (value: string) => void;
-  onToggleCategory: (category: string) => void;
-  onStyleChange: (value: string) => void;
-  onQualityTierChange: (value: string) => void;
+  space: SpaceConfig;
+  showNewRequestButton: boolean;
+  onNewRequest: () => void;
 }
 
-function ProjectHeaderStrip({
-  project,
-  imageProvider,
-  featureCategories,
-  style,
-  qualityTier,
-  onImageProviderChange,
-  onToggleCategory,
-  onStyleChange,
-  onQualityTierChange,
-}: ProjectHeaderStripProps) {
+function formatSizeDetails(project: ProjectDetail, space: SpaceConfig): string[] {
+  const details = project.space_details ?? {};
+  const parts: string[] = [];
+  for (const field of space.size_fields) {
+    const raw = details[field.key];
+    const value =
+      raw ??
+      (field.key === "lot_size_sqft" ? project.lot_size_sqft : undefined) ??
+      (field.key === "house_sqft" ? project.house_sqft : undefined);
+    if (value == null) continue;
+    const unit = field.key.endsWith("_sqft") ? "sqft" : "ft";
+    const name = field.label.replace(/\s*\(.*\)\s*$/, "");
+    parts.push(`${name} ${Number(value).toLocaleString()} ${unit}`);
+  }
+  return parts;
+}
+
+function ProjectSummary({ project, space, showNewRequestButton, onNewRequest }: ProjectSummaryProps) {
+  const label = project.space_label ?? spaceLabelFor(space, project.room_type);
+  const sizes = formatSizeDetails(project, space);
+  const count = project.design_requests.length;
   return (
     <section
-      aria-label="Project summary and settings"
-      className="mb-6 rounded border border-default bg-surface-elevated p-3 shadow-sm"
+      aria-label="Project summary"
+      className="as-card mb-6 flex flex-wrap items-center justify-between gap-4 p-4"
     >
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
-        <div className="flex min-w-0 items-center gap-3 lg:w-80 lg:shrink-0">
-          {project.site_photo_url ? (
-            <img
-              src={project.site_photo_url}
-              alt="Site Photo"
-              className="h-16 w-24 shrink-0 rounded bg-surface object-contain"
-            />
-          ) : (
-            <div className="flex h-16 w-24 shrink-0 items-center justify-center rounded bg-surface text-center text-xs font-medium text-muted">
-              No Site Photo
-            </div>
-          )}
-          <div className="min-w-0">
-            <p className="truncate text-sm font-semibold text-foreground">
+      <div className="flex min-w-0 items-center gap-4">
+        {project.site_photo_url ? (
+          <img
+            src={project.site_photo_url}
+            alt={space.id === "interior" ? "Room photo" : "Site Photo"}
+            className="h-16 w-24 shrink-0 rounded-lg bg-surface-sunken object-cover"
+          />
+        ) : (
+          <div className="flex h-16 w-24 shrink-0 items-center justify-center rounded-lg bg-surface-sunken text-center text-xs font-medium text-muted">
+            No Site Photo
+          </div>
+        )}
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="truncate text-base font-semibold tracking-tight text-foreground">
               {project.address}
             </p>
-            <p className="mt-1 text-xs text-muted">
-              Lot{" "}
-              <span className="font-medium text-foreground">
-                {project.lot_size_sqft != null
-                  ? `${project.lot_size_sqft.toLocaleString()} sqft`
-                  : "Not set"}
-              </span>
-              <span className="mx-2 text-border">|</span>
-              House{" "}
-              <span className="font-medium text-foreground">
-                {project.house_sqft != null
-                  ? `${project.house_sqft.toLocaleString()} sqft`
-                  : "Not set"}
-              </span>
-            </p>
+            <span className="pill-accent">{label}</span>
           </div>
-        </div>
-
-        <div className="min-w-0 flex-1 border-t border-default pt-3 lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0">
-          <p className="mb-2 text-xs font-semibold uppercase text-muted">
-            Settings for this project
+          <p className="mt-1 text-xs text-muted">
+            {[...sizes, `${count} design request${count === 1 ? "" : "s"}`].join("  ·  ")}
           </p>
-          <div className="grid min-w-0 grid-cols-1 gap-3 text-xs sm:grid-cols-2 xl:grid-cols-4">
-            <fieldset className="min-w-0">
-              <legend className="mb-1 font-medium text-foreground">
-                Image Provider setting
-              </legend>
-              <div className="flex flex-wrap gap-x-3 gap-y-1">
-                {IMAGE_PROVIDERS.map((provider) => (
-                  <label
-                    key={provider.value}
-                    className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap text-foreground"
-                  >
-                    <input
-                      type="radio"
-                      name="imageProvider"
-                      aria-label={provider.label}
-                      value={provider.value}
-                      checked={imageProvider === provider.value}
-                      onChange={() => onImageProviderChange(provider.value)}
-                      className="h-3.5 w-3.5"
-                    />
-                    {provider.label} provider
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-
-            <fieldset className="min-w-0">
-              <legend className="mb-1 font-medium text-foreground">
-                Style setting
-              </legend>
-              <div className="flex flex-wrap gap-x-3 gap-y-1">
-                {STYLES.map((styleOption) => (
-                  <label
-                    key={styleOption}
-                    className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap text-foreground"
-                  >
-                    <input
-                      type="radio"
-                      name="style"
-                      aria-label={styleOption}
-                      value={styleOption}
-                      checked={style === styleOption}
-                      onChange={() => onStyleChange(styleOption)}
-                      className="h-3.5 w-3.5"
-                    />
-                    {styleOption} style
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-
-            <fieldset className="min-w-0">
-              <legend className="mb-1 font-medium text-foreground">
-                Feature Categories setting
-              </legend>
-              <div className="flex flex-wrap gap-x-3 gap-y-1">
-                {FEATURE_CATEGORIES.map((category) => (
-                  <label
-                    key={category}
-                    className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap text-foreground"
-                  >
-                    <input
-                      type="checkbox"
-                      aria-label={category}
-                      checked={featureCategories.includes(category)}
-                      onChange={() => onToggleCategory(category)}
-                      className="h-3.5 w-3.5"
-                    />
-                    {category} category
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-
-            <fieldset className="min-w-0">
-              <legend className="mb-1 font-medium text-foreground">
-                Quality Tier setting
-              </legend>
-              <div className="flex flex-wrap gap-x-3 gap-y-1">
-                {QUALITY_TIERS.map((tier) => (
-                  <label
-                    key={tier}
-                    className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap text-foreground"
-                  >
-                    <input
-                      type="radio"
-                      name="qualityTier"
-                      aria-label={tier}
-                      value={tier}
-                      checked={qualityTier === tier}
-                      onChange={() => onQualityTierChange(tier)}
-                      className="h-3.5 w-3.5"
-                    />
-                    {tier} tier
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-          </div>
         </div>
       </div>
+      {showNewRequestButton && (
+        <button type="button" onClick={onNewRequest} className="btn-primary">
+          New Design Request
+        </button>
+      )}
     </section>
+  );
+}
+
+interface ProgressStepperProps {
+  project: ProjectDetail;
+  buildSheets: Record<number, BuildSheetOut>;
+  activeRenderId: number | null;
+  formOpen: boolean;
+}
+
+/** Photo → Renders → Choose → Build Sheet, so the page always says what comes next. */
+function ProgressStepper({ project, buildSheets, activeRenderId, formOpen }: ProgressStepperProps) {
+  const renders = project.design_requests.flatMap((dr) => dr.renders);
+  const chosen = renders.find((r) => r.is_chosen) ?? null;
+  const hasSheet = renders.some((r) => buildSheets[r.id] != null);
+  const current = hasSheet ? 4 : chosen ? 3 : renders.length > 0 ? 2 : 1;
+  const steps = [
+    { n: 1, label: "Photo", hint: "Added" },
+    { n: 2, label: "Renders", hint: renders.length > 0 ? `${renders.length} made` : formOpen ? "Set up below" : "Generate" },
+    { n: 3, label: "Choose", hint: chosen ? "Render picked" : renders.length > 0 ? "Pick a favourite" : "Later" },
+    { n: 4, label: "Build Sheet", hint: hasSheet ? "Ready" : chosen ? "Set up under the render" : "Later" },
+  ];
+  void activeRenderId;
+  return (
+    <ol aria-label="Progress" className="mb-6 grid grid-cols-2 gap-2 sm:grid-cols-4">
+      {steps.map((step) => {
+        const state = step.n < current ? "done" : step.n === current ? "current" : "todo";
+        return (
+          <li
+            key={step.n}
+            aria-current={state === "current" ? "step" : undefined}
+            className={`flex items-center gap-3 rounded-xl border px-3 py-2 ${
+              state === "current"
+                ? "border-accent bg-accent-soft"
+                : state === "done"
+                  ? "border-default bg-surface-elevated"
+                  : "border-default bg-surface-elevated opacity-60"
+            }`}
+          >
+            <span
+              className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+                state === "todo" ? "bg-surface-sunken text-muted" : "bg-accent text-accent-foreground"
+              }`}
+              aria-hidden="true"
+            >
+              {state === "done" ? "✓" : step.n}
+            </span>
+            <span className="min-w-0">
+              <span className="block text-sm font-semibold text-foreground">{step.label}</span>
+              <span className="block truncate text-xs text-muted">{step.hint}</span>
+            </span>
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 
@@ -1116,7 +1323,7 @@ function DesignRequestCard({
 
   if (!isExpanded) {
     return (
-      <article className="overflow-hidden rounded border border-default bg-surface-elevated shadow-sm">
+      <article className="as-card overflow-hidden">
         <div className="flex w-full items-center gap-4 p-3">
           {stripRender ? (
             <button
@@ -1187,7 +1394,7 @@ function DesignRequestCard({
                 role="link"
                 {...{ href: `/projects/${project.id}/renders/${render.id}` }}
                 aria-label={`Open Render ${render.id}`}
-                className="rounded border border-default bg-surface-elevated px-2 py-1 text-xs font-semibold text-foreground hover:border-accent hover:text-accent focus:outline-none focus:ring-2 focus:ring-accent"
+                className="btn-secondary btn-sm"
                 onClick={(event) => {
                   event.preventDefault();
                   onActivateRender(render.id);
@@ -1272,7 +1479,7 @@ function DesignRequestCard({
               Image Provider
             </dt>
             <dd className="text-foreground">
-              {formatImageProvider(dr.image_provider)}
+              {formatImageProviderWithModel(dr)}
             </dd>
           </div>
         </dl>
@@ -1420,37 +1627,56 @@ function RenderCard({
 }
 
 interface ProjectDimensionsPanelProps {
+  space: SpaceConfig;
   dr: DesignRequestOut;
   chosenRenderId: number;
+  dimensionStatus: DimensionStatus;
+  onRetryDimensions: () => void;
   dimensionValues: Record<string, string>;
   materialsLlm: string;
+  materialsModel: string;
+  groundingModel: string;
+  modelCatalog: ModelCatalog;
+  modelsLoading: boolean;
   generating: boolean;
   error: string | null;
   buildSheet: BuildSheetOut | null;
   onDimensionChange: (key: string, value: string) => void;
   onLlmChange: (value: string) => void;
+  onMaterialsModelChange: (modelId: string) => void;
+  onGroundingModelChange: (modelId: string) => void;
   onGenerate: () => void;
 }
 
 function ProjectDimensionsPanel({
+  space,
   dr,
   chosenRenderId,
+  dimensionStatus,
+  onRetryDimensions,
   dimensionValues,
   materialsLlm,
+  materialsModel,
+  groundingModel,
+  modelCatalog,
+  modelsLoading,
   generating,
   error,
   buildSheet,
   onDimensionChange,
   onLlmChange,
+  onMaterialsModelChange,
+  onGroundingModelChange,
   onGenerate,
 }: ProjectDimensionsPanelProps) {
-  const fields = getDimensionFieldsForCategories(dr.feature_categories);
-  const allFilled =
-    fields.length === 0 ||
-    fields.every((f) => (dimensionValues[f.key] ?? "").trim() !== "");
+  const materialsProviderEntry = findProvider(modelCatalog, materialsLlm);
+  const groundingProviderEntry = modelCatalog.grounding[0];
+  const fields = dimensionFieldsFor(space, dr.feature_categories);
+  const missing = fields.filter((f) => (dimensionValues[f.key] ?? "").trim() === "");
+  const allFilled = missing.length === 0;
 
-  // When a build sheet exists it is rendered full-width below the hero grid
-  // (see HeroSection), not inside this narrow rail.
+  // Once a build sheet exists it is rendered below (see HeroSection); this setup panel
+  // is replaced by it.
   if (buildSheet) {
     return null;
   }
@@ -1458,59 +1684,147 @@ function ProjectDimensionsPanel({
   return (
     <section
       id={`dimensions-render-${chosenRenderId}`}
-      className="mt-6 border-t border-default pt-6 space-y-4"
+      aria-label="Build sheet setup"
+      className="as-card mt-8 p-5 sm:p-6"
       tabIndex={-1}
     >
-      <h3 className="text-lg font-semibold text-foreground">Project Dimensions</h3>
+      <div className="mb-5 flex flex-wrap items-baseline justify-between gap-3">
+        <div>
+          <p className="as-eyebrow">Step 4</p>
+          <h3 className="as-title">Build Sheet for this render</h3>
+          <p className="as-help mt-1">
+            Confirm the dimensions, pick the models, then generate a materials list, tool list,
+            build steps, and cost range.
+          </p>
+        </div>
+      </div>
 
-      {fields.length > 0 && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {fields.map((field) => (
-            <div key={field.key}>
-              <label className="block text-sm font-medium text-foreground mb-1">
-                {field.label}
-              </label>
-              <input
-                type="number"
-                min="0"
-                step="0.5"
-                aria-label={field.label}
-                value={dimensionValues[field.key] ?? ""}
-                onChange={(e) => onDimensionChange(field.key, e.target.value)}
-                className="w-full rounded border border-default bg-surface-elevated px-3 py-2 text-foreground focus:outline-none focus:ring-2 focus:ring-accent"
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        {/* Dimensions */}
+        <div className="min-w-0">
+          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">
+              Project Dimensions
+            </h4>
+            {fields.length > 0 && dimensionStatus?.state === "loading" && (
+              <p role="status" className="text-xs text-muted">
+                <span className="animate-pulse">Auto-filling dimensions from the render…</span>
+              </p>
+            )}
+            {fields.length > 0 && dimensionStatus?.state === "done" && (
+              <p className="text-xs text-muted">
+                Auto-filled from the render; adjust anything that looks off.
+              </p>
+            )}
+          </div>
+
+          {fields.length > 0 && dimensionStatus?.state === "error" && (
+            <div role="alert" className="alert-danger mb-3 text-xs">
+              <p className="text-danger">Couldn't auto-fill dimensions: {dimensionStatus.message}</p>
+              <button
+                type="button"
+                onClick={onRetryDimensions}
+                className="mt-1 font-medium text-accent hover:underline"
+              >
+                Try again
+              </button>
+              <span className="text-muted"> or type them in below.</span>
+            </div>
+          )}
+
+          {fields.length > 0 ? (
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+              {fields.map((field) => (
+                <div key={field.key}>
+                  <label
+                    htmlFor={`dim-${chosenRenderId}-${field.key}`}
+                    className="mb-1 block text-xs font-medium text-foreground"
+                  >
+                    {field.label}
+                  </label>
+                  <input
+                    id={`dim-${chosenRenderId}-${field.key}`}
+                    type="number"
+                    min="0"
+                    step="0.5"
+                    aria-label={field.label}
+                    value={dimensionValues[field.key] ?? ""}
+                    onChange={(e) => onDimensionChange(field.key, e.target.value)}
+                    className="field"
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-muted">
+              No measurements needed for {formatFeatureCategories(dr.feature_categories)}.
+            </p>
+          )}
+        </div>
+
+        {/* Models */}
+        <div className="min-w-0 space-y-5">
+          <fieldset>
+            <legend className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
+              Materials LLM
+            </legend>
+            <div className="flex flex-wrap gap-2">
+              {MATERIALS_LLMS.map((opt) => {
+                const on = materialsLlm === opt.value;
+                return (
+                  <label key={opt.value} className={`chip ${on ? "chip-on" : ""}`}>
+                    <input
+                      type="radio"
+                      name={`materialsLlm-${chosenRenderId}`}
+                      value={opt.value}
+                      checked={on}
+                      onChange={() => onLlmChange(opt.value)}
+                    />
+                    {opt.label}
+                  </label>
+                );
+              })}
+            </div>
+            <div className="mt-3">
+              <ModelPicker
+                label="Materials model"
+                provider={materialsProviderEntry}
+                value={materialsModel}
+                loading={modelsLoading}
+                onChange={onMaterialsModelChange}
               />
             </div>
-          ))}
+          </fieldset>
+
+          <div>
+            <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
+              Product research
+            </h4>
+            <ModelPicker
+              label="Product research model"
+              provider={groundingProviderEntry}
+              value={groundingModel}
+              loading={modelsLoading}
+              onChange={onGroundingModelChange}
+            />
+          </div>
         </div>
-      )}
+      </div>
 
-      <fieldset>
-        <legend className="font-medium text-foreground mb-2">Materials LLM</legend>
-        <div className="flex gap-4 flex-wrap">
-          {MATERIALS_LLMS.map((opt) => (
-            <label key={opt.value} className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="radio"
-                name={`materialsLlm-${chosenRenderId}`}
-                value={opt.value}
-                checked={materialsLlm === opt.value}
-                onChange={() => onLlmChange(opt.value)}
-              />
-              {opt.label}
-            </label>
-          ))}
-        </div>
-      </fieldset>
+      {error && <p className="mt-5 text-sm text-danger">{error}</p>}
 
-      {error && <p className="text-danger text-sm">{error}</p>}
-
-      <button
-        disabled={!allFilled || generating}
-        onClick={onGenerate}
-        className="bg-accent text-accent-foreground px-5 py-2 rounded hover:opacity-90 disabled:opacity-50"
-      >
-        {generating ? "Generating Build Sheet…" : "Generate Build Sheet"}
-      </button>
+      <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-default pt-5">
+        <button disabled={!allFilled || generating} onClick={onGenerate} className="btn-primary btn-lg">
+          {generating ? "Generating Build Sheet…" : "Generate Build Sheet"}
+        </button>
+        <span className="text-xs text-muted">
+          {generating
+            ? "Researching products and pricing the materials. This takes about a minute."
+            : allFilled
+              ? "Runs product research, then prices every material for this design."
+              : `Fill in ${missing.length} more dimension${missing.length === 1 ? "" : "s"} to enable.`}
+        </span>
+      </div>
     </section>
   );
 }
@@ -1609,7 +1923,7 @@ function BuildSheetDisplay({
     <div className="space-y-8">
       {/* ───────────── Cost / skill banner ───────────── */}
       <div
-        className="as-fade-up relative overflow-hidden rounded-2xl border border-default bg-surface-elevated shadow-sm"
+        className="as-fade-up as-well relative overflow-hidden rounded-2xl"
         style={{ animationDelay: "0ms" }}
       >
         <div
@@ -1658,7 +1972,7 @@ function BuildSheetDisplay({
           <button
             onClick={handleExport}
             disabled={exporting}
-            className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-accent px-5 py-2.5 text-sm font-semibold text-accent-foreground shadow-sm transition hover:opacity-90 disabled:opacity-50"
+            className="btn-primary btn-lg shrink-0"
           >
             <Icon path={ICON.download} className="h-4 w-4" />
             {exporting ? "Exporting…" : "Export build sheet"}
@@ -1688,7 +2002,7 @@ function BuildSheetDisplay({
                       {!last && <span className="mt-1 w-px flex-1 bg-border" />}
                     </div>
                     {/* card */}
-                    <div className="flex-1 rounded-xl border border-default bg-surface-elevated p-4 shadow-sm">
+                    <div className="as-card flex-1 p-4">
                       <p className="text-sm leading-relaxed text-foreground">{step.description}</p>
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         {step.estimated_time && (
@@ -1721,7 +2035,7 @@ function BuildSheetDisplay({
                 {buildSheet.tool_list.map((tool: string, i: number) => (
                   <span
                     key={i}
-                    className="inline-flex items-center rounded-lg border border-default bg-surface-elevated px-3 py-1.5 text-sm text-foreground shadow-sm"
+                    className="chip cursor-default"
                   >
                     {tool}
                   </span>
@@ -1737,7 +2051,7 @@ function BuildSheetDisplay({
                 Assumptions
               </h3>
               <ul
-                className="space-y-2.5 rounded-xl border-l-2 border-accent bg-surface-elevated p-4 shadow-sm"
+                className="as-card space-y-2.5 border-l-4 border-l-accent p-4"
                 style={{ borderLeftColor: "var(--color-accent)" }}
               >
                 {assumptions.map((a, i) => (
@@ -1752,7 +2066,7 @@ function BuildSheetDisplay({
 
           {excluded.length > 0 && (
             <section className="as-fade-up" style={{ animationDelay: "240ms" }}>
-              <details className="group rounded-xl border border-default bg-surface-elevated shadow-sm">
+              <details className="as-card group">
                 <summary className="flex cursor-pointer list-none items-center gap-2 p-4 text-sm font-semibold text-foreground">
                   <Icon path={ICON.alert} className="h-4 w-4 text-muted" />
                   {excluded.length} material{excluded.length > 1 ? "s" : ""} excluded
@@ -1799,7 +2113,7 @@ function BuildSheetDisplay({
           Materials &amp; costs
         </h3>
         {hasMaterials ? (
-          <div className="overflow-hidden rounded-xl border border-default shadow-sm">
+          <div className="as-card overflow-hidden">
             <div className="overflow-x-auto">
               <table className="min-w-full text-sm">
                 <thead>
@@ -1850,7 +2164,7 @@ function BuildSheetDisplay({
                             href={item.product_url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 rounded-lg border border-default px-2.5 py-1 text-xs font-medium text-accent transition hover:border-accent"
+                            className="btn-secondary btn-sm text-accent"
                           >
                             View
                             <Icon path={ICON.external} className="h-3 w-3" />
