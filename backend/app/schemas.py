@@ -106,6 +106,14 @@ class BuildSheetOut(BaseModel):
 class ModelInfoOut(BaseModel):
     id: str
     display_name: str
+    # Curated comparison data (see app/providers/model_metadata.py)
+    tier: str = "unknown"
+    quality: Optional[int] = None
+    cost: Optional[str] = None
+    cost_rank: Optional[int] = None
+    recommended: bool = False
+    note: Optional[str] = None
+    current: bool = True
 
 
 class ProviderModelsOut(BaseModel):

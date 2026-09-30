@@ -216,7 +216,7 @@ describe("SettingsPage — available models", () => {
     const openai = within(panel).getByRole("article", { name: /OpenAI Images models/i });
     expect(within(openai).getByText("GPT Image 2.5 Flare")).toBeInTheDocument();
     expect(within(openai).getByText("gpt-image-2.5-sunburst")).toBeInTheDocument();
-    expect(within(openai).getByText(/2 models from openai/i)).toBeInTheDocument();
+    expect(within(openai).getByText(/3 models from openai/i)).toBeInTheDocument();
 
     const claude = within(panel).getByRole("article", { name: /Anthropic Claude models/i });
     expect(within(claude).getByText(/ANTHROPIC_API_KEY not set/i)).toBeInTheDocument();

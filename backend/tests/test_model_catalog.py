@@ -128,7 +128,14 @@ def test_api_models_groups_by_role(monkeypatch):
     grounding = body["grounding"][0]
     assert grounding["slug"] == "perplexity"
     assert grounding["source"] == "live"
-    assert grounding["models"] == [{"id": "perplexity/sonar", "display_name": "Sonar"}]
+    [sonar] = grounding["models"]
+    assert sonar["id"] == "perplexity/sonar"
+    assert sonar["display_name"] == "Sonar"
+    # Curated metadata is merged in for the comparison UI.
+    assert sonar["recommended"] is True
+    assert sonar["current"] is True
+    assert sonar["quality"] == 3
+    assert "$0.25" in sonar["cost"]
     openai_image = next(p for p in body["image"] if p["slug"] == "gpt_image")
     assert openai_image["key_set"] is False
     assert openai_image["source"] == "fallback"

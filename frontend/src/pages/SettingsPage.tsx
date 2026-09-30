@@ -338,16 +338,32 @@ function AvailableModelsPanel({
                 : `${provider.key_env} not set — built-in list`}
               {provider.error && provider.key_set ? ` · ${provider.error}` : ""}
             </p>
-            <ul className="mt-2 max-h-40 space-y-0.5 overflow-y-auto text-sm text-foreground">
-              {provider.models.map((m) => (
-                <li key={m.id} className="flex flex-wrap items-baseline gap-2">
-                  <span>{m.display_name}</span>
-                  <code className="text-xs text-muted">{m.id}</code>
-                  {m.id === provider.default_model && (
-                    <span className="text-[11px] uppercase text-accent">default</span>
-                  )}
+            <ul className="mt-2 max-h-56 space-y-1 overflow-y-auto text-sm text-foreground">
+              {provider.models
+                .filter((m) => m.current)
+                .map((m) => (
+                  <li key={m.id} className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-0.5">
+                    <span className="flex flex-wrap items-baseline gap-2">
+                      <span>{m.display_name}</span>
+                      <code className="text-xs text-muted">{m.id}</code>
+                      {m.recommended && (
+                        <span className="text-[11px] uppercase text-accent">recommended</span>
+                      )}
+                    </span>
+                    <span className="text-xs text-muted" aria-label="quality">
+                      {m.quality != null ? "●".repeat(m.quality) + "○".repeat(5 - m.quality) : ""}
+                    </span>
+                    <span className="col-span-2 text-xs text-muted">
+                      {[m.cost, m.note].filter(Boolean).join(" · ")}
+                    </span>
+                  </li>
+                ))}
+              {provider.models.some((m) => !m.current) && (
+                <li className="text-xs text-muted">
+                  + {provider.models.filter((m) => !m.current).length} older or snapshot ids
+                  (available under "Show older" on the project page)
                 </li>
-              ))}
+              )}
             </ul>
           </article>
         ))}

@@ -69,8 +69,12 @@ describe("catalog helpers", () => {
   it("keeps a saved model that the vendor list no longer includes", () => {
     const provider = findProvider(catalog, "gpt_image");
     const options = modelOptions(provider, "gpt-image-2");
-    expect(options[0]).toEqual({ id: "gpt-image-2", display_name: "gpt-image-2 (saved)" });
-    expect(options).toHaveLength(3);
+    expect(options[0]).toMatchObject({
+      id: "gpt-image-2",
+      display_name: "gpt-image-2 (saved)",
+      current: true,
+    });
+    expect(options).toHaveLength(4);
   });
 
   it("merges saved selections instead of overwriting them", () => {

@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from app.providers.model_metadata import ModelMeta, annotate
+
 logger = logging.getLogger(__name__)
 
 CATALOG_TTL_SECONDS = 600
@@ -36,6 +38,11 @@ _VENDOR_TIMEOUT_SECONDS = 20.0
 class ModelInfo:
     id: str
     display_name: str
+    # Curated quality / cost / status; see app.providers.model_metadata.
+    meta: ModelMeta = field(default_factory=ModelMeta, compare=False)
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "display_name": self.display_name, **self.meta.to_dict()}
 
 
 Lister = Callable[[str], Awaitable[list[ModelInfo]]]
@@ -71,7 +78,7 @@ class ProviderModels:
             "key_env": self.spec.key_env,
             "key_set": self.key_set,
             "default_model": self.spec.default_model,
-            "models": [{"id": m.id, "display_name": m.display_name} for m in self.models],
+            "models": [m.to_dict() for m in self.models],
             "source": self.source,
             "error": self.error,
         }
@@ -278,6 +285,24 @@ def default_model_for(slug: str) -> str:
     return PROVIDERS_BY_SLUG[slug].default_model
 
 
+def annotate_models(spec: ProviderSpec, models: list[ModelInfo]) -> list[ModelInfo]:
+    """Attach curated metadata and order: default first, then current models by quality,
+    then everything else (snapshots, retired ids) so the UI can fold them away."""
+    annotated = [
+        ModelInfo(m.id, m.display_name, annotate(spec.slug, m.id)) for m in models
+    ]
+    annotated.sort(
+        key=lambda m: (
+            m.id != spec.default_model,
+            not m.meta.current,
+            -(m.meta.quality or 0),
+            m.meta.cost_rank or 99,
+            m.id,
+        )
+    )
+    return annotated
+
+
 # ---------------------------------------------------------------------------
 # Catalog with cache
 # ---------------------------------------------------------------------------
@@ -299,7 +324,7 @@ class ModelCatalog:
 
     @staticmethod
     def _fallback(spec: ProviderSpec, key_set: bool, error: str | None) -> ProviderModels:
-        models = [ModelInfo(m, _pretty(m)) for m in spec.fallback_models]
+        models = annotate_models(spec, [ModelInfo(m, _pretty(m)) for m in spec.fallback_models])
         return ProviderModels(
             spec=spec,
             models=models,
@@ -339,8 +364,7 @@ class ModelCatalog:
                     models = await spec.lister(api_key)
                     if not models:
                         raise ValueError("vendor returned no models for this role")
-                    # Show the recommended default first; vendors also list retired ids.
-                    models.sort(key=lambda m: m.id != spec.default_model)
+                    models = annotate_models(spec, models)
                     result = ProviderModels(
                         spec=spec,
                         models=models,

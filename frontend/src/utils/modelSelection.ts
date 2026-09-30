@@ -1,4 +1,4 @@
-import type { ProviderModels } from "../api/models";
+import type { ModelInfo, ProviderModels } from "../api/models";
 
 /** Persisted per-browser model choices so a user is not re-picking on every visit. */
 export interface SavedModelSelection {
@@ -54,14 +54,24 @@ export function resolveSelectedModel(
   return provider?.default_model ?? "";
 }
 
-/** Options for a select: the vendor's list, plus the current value if it is not listed. */
+/** Options for a picker: the vendor's list, plus the current value if it is not listed. */
 export function modelOptions(
   provider: ProviderModels | undefined,
   selected: string,
-): { id: string; display_name: string }[] {
+): ModelInfo[] {
   const options = [...(provider?.models ?? [])];
   if (selected && !options.some((m) => m.id === selected)) {
-    options.unshift({ id: selected, display_name: `${selected} (saved)` });
+    options.unshift({
+      id: selected,
+      display_name: `${selected} (saved)`,
+      tier: "unknown",
+      quality: null,
+      cost: null,
+      cost_rank: null,
+      recommended: false,
+      note: "Saved choice not in the vendor's current list",
+      current: true,
+    });
   }
   return options;
 }

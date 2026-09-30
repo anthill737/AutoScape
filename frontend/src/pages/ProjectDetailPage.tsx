@@ -5,7 +5,6 @@ import { ApiError } from "../api/errors";
 import { findProvider, ModelCatalog, ProviderModels } from "../api/models";
 import {
   IMAGE_PROVIDERS,
-  FEATURE_CATEGORIES,
   STYLES,
   QUALITY_TIERS,
   MATERIALS_LLMS,
@@ -31,6 +30,7 @@ import {
 } from "../utils/modelSelection";
 import { useModelCatalog } from "../hooks/useModelCatalog";
 import ModelPicker from "../components/ModelPicker";
+import DesignRequestForm, { type IterationSource } from "../components/DesignRequestForm";
 import TopNav from "../components/TopNav";
 
 function sortDesignRequestsNewestFirst(
@@ -237,6 +237,8 @@ export default function ProjectDetailPage() {
   const [style, setStyle] = useState<string>(STYLES[0]);
   const [qualityTier, setQualityTier] = useState<string>(QUALITY_TIERS[0]);
   const [composedPrompt, setComposedPrompt] = useState<string>("");
+  // Once the user edits the prompt we stop rewriting it when chips change.
+  const [promptIsCustom, setPromptIsCustom] = useState(false);
   const [iterationParentRenderId, setIterationParentRenderId] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -413,12 +415,12 @@ export default function ProjectDetailPage() {
     }
   }, [project]);
 
-  // Re-seed composed prompt on picker changes, but only for new (non-iteration) requests
+  // Re-seed the prompt when chips change, unless the user has taken over the text.
   useEffect(() => {
-    if (iterationParentRenderId === null) {
+    if (!promptIsCustom) {
       setComposedPrompt(seedComposedPrompt(featureCategories, style, qualityTier));
     }
-  }, [featureCategories, style, qualityTier, iterationParentRenderId]);
+  }, [featureCategories, style, qualityTier, promptIsCustom]);
 
   useEffect(() => {
     if (!showForm || !pendingFormFocusRef.current) return;
@@ -433,6 +435,7 @@ export default function ProjectDetailPage() {
 
   function openForm() {
     setIterationParentRenderId(null);
+    setPromptIsCustom(false);
     setComposedPrompt(seedComposedPrompt(featureCategories, style, qualityTier));
     setSubmitError(null);
     setSubmitWarning(null);
@@ -451,6 +454,8 @@ export default function ProjectDetailPage() {
     setStyle(dr.style);
     setQualityTier(dr.quality_tier);
     setIterationParentRenderId(render.id);
+    // The parent's prompt is kept verbatim; treat it as user-owned text.
+    setPromptIsCustom(true);
     setComposedPrompt(dr.composed_prompt);
     setSubmitError(null);
     setSubmitWarning(null);
@@ -467,9 +472,26 @@ export default function ProjectDetailPage() {
     navigate(nextPath, { replace: true });
   }
 
+  function switchToSitePhoto() {
+    setIterationParentRenderId(null);
+    setPromptIsCustom(false);
+    setComposedPrompt(seedComposedPrompt(featureCategories, style, qualityTier));
+  }
+
+  function editPrompt(value: string) {
+    setPromptIsCustom(true);
+    setComposedPrompt(value);
+  }
+
+  function resetPrompt() {
+    setPromptIsCustom(false);
+    setComposedPrompt(seedComposedPrompt(featureCategories, style, qualityTier));
+  }
+
   function closeForm() {
     setShowForm(false);
     setIterationParentRenderId(null);
+    setPromptIsCustom(false);
   }
 
   function toggleCategory(cat: string) {
@@ -583,6 +605,17 @@ export default function ProjectDetailPage() {
     project != null ? getDesignRequestNumberMap(project.design_requests) : new Map<number, number>();
   const designRequestsNewestFirst =
     project != null ? sortDesignRequestsNewestFirst(project.design_requests) : [];
+  const iterationSource: IterationSource | null = (() => {
+    if (!project || iterationParentRenderId == null) return null;
+    const ctx = findActiveRenderContext(project, iterationParentRenderId);
+    if (!ctx) return null;
+    return {
+      render: ctx.render,
+      dr: ctx.dr,
+      positionLabel: `${ctx.requestNumber}.${ctx.renderNumber}`,
+      requestNumber: ctx.requestNumber,
+    };
+  })();
 
   useEffect(() => {
     if (!activeContext) return;
@@ -616,21 +649,41 @@ export default function ProjectDetailPage() {
 
         {project && (
           <>
-            <ProjectHeaderStrip
+            <ProjectSummary
               project={project}
-              imageProvider={imageProvider}
-              imageProviderEntry={imageProviderEntry}
-              imageModel={imageModel}
-              modelsLoading={modelsLoading}
-              featureCategories={featureCategories}
-              style={style}
-              qualityTier={qualityTier}
-              onImageProviderChange={changeImageProvider}
-              onImageModelChange={changeImageModel}
-              onToggleCategory={toggleCategory}
-              onStyleChange={setStyle}
-              onQualityTierChange={setQualityTier}
+              showNewRequestButton={!showForm}
+              onNewRequest={openForm}
             />
+
+            {showForm && (
+              <DesignRequestForm
+                formRef={designRequestFormRef}
+                sitePhotoUrl={project.site_photo_url}
+                iterationSource={iterationSource}
+                featureCategories={featureCategories}
+                style={style}
+                qualityTier={qualityTier}
+                composedPrompt={composedPrompt}
+                promptIsCustom={promptIsCustom}
+                imageProvider={imageProvider}
+                imageProviderEntry={imageProviderEntry}
+                imageModel={imageModel}
+                modelsLoading={modelsLoading}
+                submitting={submitting}
+                submitError={submitError}
+                submitWarning={submitWarning}
+                onToggleCategory={toggleCategory}
+                onStyleChange={setStyle}
+                onQualityTierChange={setQualityTier}
+                onPromptChange={editPrompt}
+                onResetPrompt={resetPrompt}
+                onImageProviderChange={changeImageProvider}
+                onImageModelChange={changeImageModel}
+                onUseSitePhoto={switchToSitePhoto}
+                onSubmit={handleSubmit}
+                onCancel={closeForm}
+              />
+            )}
 
             {activeContext && (
               <HeroSection
@@ -679,84 +732,11 @@ export default function ProjectDetailPage() {
                 <h2 className="text-xl font-semibold text-foreground">
                   Design Tree
                 </h2>
-                  {!showForm && (
-                  <button
-                    onClick={openForm}
-                    className="bg-accent text-accent-foreground px-4 py-2 rounded hover:opacity-90"
-                  >
-                    New Design Request
-                  </button>
-                )}
               </div>
-
-              {/* Design Request form (new or iteration) */}
-              {showForm && (
-                <form
-                  id="design-request-form"
-                  ref={designRequestFormRef}
-                  onSubmit={handleSubmit}
-                  className="bg-surface-elevated rounded border border-default shadow p-6 mb-6 space-y-5"
-                  tabIndex={-1}
-                >
-                  <h3 className="text-lg font-semibold">
-                    {iterationParentRenderId != null
-                      ? `Iterate on Render #${iterationParentRenderId}`
-                      : "New Design Request"}
-                  </h3>
-
-                  {iterationParentRenderId != null && (
-                    <input
-                      type="hidden"
-                      name="parent_render_id"
-                      value={iterationParentRenderId}
-                    />
-                  )}
-
-                  <div>
-                    <label className="block font-medium text-foreground mb-1">
-                      Composed Prompt
-                    </label>
-                    <textarea
-                      value={composedPrompt}
-                      onChange={(e) => setComposedPrompt(e.target.value)}
-                      rows={3}
-                      className="w-full rounded border border-default bg-surface-elevated px-3 py-2 text-foreground focus:outline-none focus:ring-2 focus:ring-accent"
-                    />
-                  </div>
-
-                  {submitWarning && (
-                    <div className="rounded border border-danger bg-surface-elevated px-3 py-2 text-sm text-danger">
-                      {submitWarning}
-                    </div>
-                  )}
-
-                  {submitError && (
-                    <p className="text-danger text-sm">{submitError}</p>
-                  )}
-
-                  <div className="flex gap-3">
-                    <button
-                      type="submit"
-                      disabled={submitting}
-                      className="bg-accent text-accent-foreground px-5 py-2 rounded hover:opacity-90 disabled:opacity-50"
-                    >
-                      {submitting ? "Generating…" : "Generate Renders"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={closeForm}
-                      disabled={submitting}
-                      className="bg-surface text-foreground border border-default px-5 py-2 rounded hover:border-accent disabled:opacity-50"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </form>
-              )}
 
               {project.design_requests.length === 0 && !showForm && (
                 <p className="text-muted">
-                  No design requests yet. Click "New Design Request" to get
+                  No design requests yet. Click "New Design Request" above to get
                   started.
                 </p>
               )}
@@ -1024,191 +1004,61 @@ function HeroSection({
   );
 }
 
-interface ProjectHeaderStripProps {
+interface ProjectSummaryProps {
   project: ProjectDetail;
-  imageProvider: string;
-  imageProviderEntry: ProviderModels | undefined;
-  imageModel: string;
-  modelsLoading: boolean;
-  featureCategories: string[];
-  style: string;
-  qualityTier: string;
-  onImageProviderChange: (value: string) => void;
-  onImageModelChange: (modelId: string) => void;
-  onToggleCategory: (category: string) => void;
-  onStyleChange: (value: string) => void;
-  onQualityTierChange: (value: string) => void;
+  showNewRequestButton: boolean;
+  onNewRequest: () => void;
 }
 
-function ProjectHeaderStrip({
-  project,
-  imageProvider,
-  imageProviderEntry,
-  imageModel,
-  modelsLoading,
-  featureCategories,
-  style,
-  qualityTier,
-  onImageProviderChange,
-  onImageModelChange,
-  onToggleCategory,
-  onStyleChange,
-  onQualityTierChange,
-}: ProjectHeaderStripProps) {
+function ProjectSummary({ project, showNewRequestButton, onNewRequest }: ProjectSummaryProps) {
   return (
     <section
-      aria-label="Project summary and settings"
-      className="mb-6 rounded border border-default bg-surface-elevated p-3 shadow-sm"
+      aria-label="Project summary"
+      className="mb-6 flex flex-wrap items-center justify-between gap-4 rounded border border-default bg-surface-elevated p-3 shadow-sm"
     >
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
-        <div className="flex min-w-0 items-center gap-3 lg:w-80 lg:shrink-0">
-          {project.site_photo_url ? (
-            <img
-              src={project.site_photo_url}
-              alt="Site Photo"
-              className="h-16 w-24 shrink-0 rounded bg-surface object-contain"
-            />
-          ) : (
-            <div className="flex h-16 w-24 shrink-0 items-center justify-center rounded bg-surface text-center text-xs font-medium text-muted">
-              No Site Photo
-            </div>
-          )}
-          <div className="min-w-0">
-            <p className="truncate text-sm font-semibold text-foreground">
-              {project.address}
-            </p>
-            <p className="mt-1 text-xs text-muted">
-              Lot{" "}
-              <span className="font-medium text-foreground">
-                {project.lot_size_sqft != null
-                  ? `${project.lot_size_sqft.toLocaleString()} sqft`
-                  : "Not set"}
-              </span>
-              <span className="mx-2 text-border">|</span>
-              House{" "}
-              <span className="font-medium text-foreground">
-                {project.house_sqft != null
-                  ? `${project.house_sqft.toLocaleString()} sqft`
-                  : "Not set"}
-              </span>
-            </p>
+      <div className="flex min-w-0 items-center gap-3">
+        {project.site_photo_url ? (
+          <img
+            src={project.site_photo_url}
+            alt="Site Photo"
+            className="h-16 w-24 shrink-0 rounded bg-surface object-contain"
+          />
+        ) : (
+          <div className="flex h-16 w-24 shrink-0 items-center justify-center rounded bg-surface text-center text-xs font-medium text-muted">
+            No Site Photo
           </div>
-        </div>
-
-        <div className="min-w-0 flex-1 border-t border-default pt-3 lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0">
-          <p className="mb-2 text-xs font-semibold uppercase text-muted">
-            Settings for this project
+        )}
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold text-foreground">{project.address}</p>
+          <p className="mt-1 text-xs text-muted">
+            Lot{" "}
+            <span className="font-medium text-foreground">
+              {project.lot_size_sqft != null
+                ? `${project.lot_size_sqft.toLocaleString()} sqft`
+                : "Not set"}
+            </span>
+            <span className="mx-2 text-border">|</span>
+            House{" "}
+            <span className="font-medium text-foreground">
+              {project.house_sqft != null
+                ? `${project.house_sqft.toLocaleString()} sqft`
+                : "Not set"}
+            </span>
+            <span className="mx-2 text-border">|</span>
+            {project.design_requests.length} design request
+            {project.design_requests.length === 1 ? "" : "s"}
           </p>
-          <div className="grid min-w-0 grid-cols-1 gap-3 text-xs sm:grid-cols-2 xl:grid-cols-4">
-            <fieldset className="min-w-0">
-              <legend className="mb-1 font-medium text-foreground">
-                Image Provider setting
-              </legend>
-              <div className="flex flex-wrap gap-x-3 gap-y-1">
-                {IMAGE_PROVIDERS.map((provider) => (
-                  <label
-                    key={provider.value}
-                    className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap text-foreground"
-                  >
-                    <input
-                      type="radio"
-                      name="imageProvider"
-                      aria-label={provider.label}
-                      value={provider.value}
-                      checked={imageProvider === provider.value}
-                      onChange={() => onImageProviderChange(provider.value)}
-                      className="h-3.5 w-3.5"
-                    />
-                    {provider.label}
-                  </label>
-                ))}
-              </div>
-              <div className="mt-2">
-                <ModelPicker
-                  label="Image model"
-                  provider={imageProviderEntry}
-                  value={imageModel}
-                  loading={modelsLoading}
-                  onChange={onImageModelChange}
-                />
-              </div>
-            </fieldset>
-
-            <fieldset className="min-w-0">
-              <legend className="mb-1 font-medium text-foreground">
-                Style setting
-              </legend>
-              <div className="flex flex-wrap gap-x-3 gap-y-1">
-                {STYLES.map((styleOption) => (
-                  <label
-                    key={styleOption}
-                    className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap text-foreground"
-                  >
-                    <input
-                      type="radio"
-                      name="style"
-                      aria-label={styleOption}
-                      value={styleOption}
-                      checked={style === styleOption}
-                      onChange={() => onStyleChange(styleOption)}
-                      className="h-3.5 w-3.5"
-                    />
-                    {styleOption} style
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-
-            <fieldset className="min-w-0">
-              <legend className="mb-1 font-medium text-foreground">
-                Feature Categories setting
-              </legend>
-              <div className="flex flex-wrap gap-x-3 gap-y-1">
-                {FEATURE_CATEGORIES.map((category) => (
-                  <label
-                    key={category}
-                    className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap text-foreground"
-                  >
-                    <input
-                      type="checkbox"
-                      aria-label={category}
-                      checked={featureCategories.includes(category)}
-                      onChange={() => onToggleCategory(category)}
-                      className="h-3.5 w-3.5"
-                    />
-                    {category} category
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-
-            <fieldset className="min-w-0">
-              <legend className="mb-1 font-medium text-foreground">
-                Quality Tier setting
-              </legend>
-              <div className="flex flex-wrap gap-x-3 gap-y-1">
-                {QUALITY_TIERS.map((tier) => (
-                  <label
-                    key={tier}
-                    className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap text-foreground"
-                  >
-                    <input
-                      type="radio"
-                      name="qualityTier"
-                      aria-label={tier}
-                      value={tier}
-                      checked={qualityTier === tier}
-                      onChange={() => onQualityTierChange(tier)}
-                      className="h-3.5 w-3.5"
-                    />
-                    {tier} tier
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-          </div>
         </div>
       </div>
+      {showNewRequestButton && (
+        <button
+          type="button"
+          onClick={onNewRequest}
+          className="rounded bg-accent px-4 py-2 text-sm font-semibold text-accent-foreground hover:opacity-90"
+        >
+          New Design Request
+        </button>
+      )}
     </section>
   );
 }
