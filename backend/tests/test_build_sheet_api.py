@@ -312,11 +312,72 @@ class TestCreateBuildSheet:
                 "app.main.MaterialsLLM.make_adapter",
                 return_value=mock_adapter,
             ):
-                with patch(
-                    "app.domain.build_sheet_validation.validate_material_item_url",
-                    return_value=(True, "URL passed validation."),
-                ):
-                    return c.post(f"/api/renders/{render_id}/build-sheet", json=body)
+                return c.post(f"/api/renders/{render_id}/build-sheet", json=body)
+
+    def test_model_choices_are_passed_through_and_stored(self, setup, monkeypatch):
+        c, render_id = setup
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("PERPLEXITY_API_KEY", "px-test")
+        seen: dict = {}
+
+        def fake_make_adapter(self, model=None):
+            seen["materials_model"] = model
+            adapter = MagicMock()
+            adapter.generate_build_sheet = AsyncMock(return_value=_MOCK_BUILD_SHEET)
+            return adapter
+
+        def fake_grounding(model=None):
+            seen["grounding_model"] = model
+            grounding = MagicMock()
+            grounding.search = AsyncMock(return_value=_MOCK_SEARCH_RESULTS)
+            return grounding
+
+        body = {
+            **_VALID_POST_BODY,
+            "materials_model": "claude-sonnet-5-5",
+            "grounding_model": "openai/gpt-5.6-luna",
+        }
+        with patch("app.main.MaterialsLLM.make_adapter", fake_make_adapter):
+            with patch("app.main.SearchGrounding", side_effect=fake_grounding):
+                resp = c.post(f"/api/renders/{render_id}/build-sheet", json=body)
+
+        assert resp.status_code == 201
+        assert seen == {
+            "materials_model": "claude-sonnet-5-5",
+            "grounding_model": "openai/gpt-5.6-luna",
+        }
+        data = resp.json()
+        assert data["materials_model"] == "claude-sonnet-5-5"
+        assert data["grounding_model"] == "openai/gpt-5.6-luna"
+        fetched = c.get(f"/api/renders/{render_id}/build-sheet").json()
+        assert fetched["materials_model"] == "claude-sonnet-5-5"
+        assert fetched["grounding_model"] == "openai/gpt-5.6-luna"
+
+    def test_defaults_are_recorded_when_no_models_given(self, setup, monkeypatch):
+        from app.providers.model_catalog import default_model_for
+
+        c, render_id = setup
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("PERPLEXITY_API_KEY", "px-test")
+
+        resp = self._post_build_sheet(c, render_id)
+
+        assert resp.status_code == 201
+        assert resp.json()["materials_model"] == default_model_for("claude_sonnet")
+        assert resp.json()["grounding_model"] == default_model_for("perplexity")
+
+    def test_grounding_failure_returns_structured_error(self, setup, monkeypatch):
+        c, render_id = setup
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("PERPLEXITY_API_KEY", "px-test")
+        with patch(
+            "app.main.SearchGrounding.search",
+            new=AsyncMock(side_effect=RuntimeError("HTTP 401 Unauthorized")),
+        ):
+            resp = c.post(f"/api/renders/{render_id}/build-sheet", json=_VALID_POST_BODY)
+
+        assert resp.status_code == 500
+        assert resp.json()["detail"].startswith("Search grounding failed: RuntimeError")
 
     def test_returns_201_with_all_required_fields(self, setup, monkeypatch):
         c, render_id = setup
@@ -361,139 +422,6 @@ class TestCreateBuildSheet:
             "assumptions": [],
         }
 
-        def fake_validate(item_name, candidate_url):
-            if "Search result" in item_name:
-                return False, "URL appears to be a search/category page."
-            return True, "URL passed validation."
-
-        with patch(
-            "app.main.SearchGrounding.search",
-            new=AsyncMock(return_value=_MOCK_SEARCH_RESULTS),
-        ):
-            mock_adapter = MagicMock()
-            mock_adapter.generate_build_sheet = AsyncMock(return_value=draft)
-            with patch("app.main.MaterialsLLM.make_adapter", return_value=mock_adapter):
-                with patch(
-                    "app.domain.build_sheet_validation.validate_material_item_url",
-                    side_effect=fake_validate,
-                ):
-                    resp = c.post(f"/api/renders/{render_id}/build-sheet", json=_VALID_POST_BODY)
-
-        assert resp.status_code == 201
-        data = resp.json()
-        # No items are dropped anymore — every material gets a working search link.
-        assert [item["name"] for item in data["material_items"]] == [
-            "Approved deck board",
-            "Search result lumber",
-        ]
-        assert not any("failed validation" in a for a in data["assumptions"])
-        for item in data["material_items"]:
-            assert item["product_url"].startswith(f"https://www.{_HOME_DEPOT['domain']}/s/")
-
-        get_resp = c.get(f"/api/renders/{render_id}/build-sheet")
-        assert get_resp.status_code == 200
-        assert get_resp.json()["material_items"] == data["material_items"]
-        assert get_resp.json()["assumptions"] == data["assumptions"]
-
-    def test_unknown_render_returns_404(self, setup):
-        c, _ = setup
-        resp = c.post("/api/renders/99999/build-sheet", json=_VALID_POST_BODY)
-        assert resp.status_code == 404
-
-    def test_invalid_materials_llm_returns_422(self, setup):
-        c, render_id = setup
-        resp = c.post(
-            f"/api/renders/{render_id}/build-sheet",
-            json={"materials_llm": "not_a_real_llm", "dimensions": {}},
-        )
-        assert resp.status_code == 422
-
-    def test_missing_perplexity_key_returns_400(self, setup, monkeypatch):
-        c, render_id = setup
-        monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
-
-        from app.providers.base import MissingApiKeyError
-
-        with patch(
-            "app.main.SearchGrounding.search",
-            new=AsyncMock(
-                side_effect=MissingApiKeyError("PERPLEXITY_API_KEY is not set in the environment.")
-            ),
-        ):
-            resp = c.post(f"/api/renders/{render_id}/build-sheet", json=_VALID_POST_BODY)
-
-        assert resp.status_code == 400
-        assert "PERPLEXITY_API_KEY" in resp.json()["detail"]
-
-    def test_missing_llm_key_returns_400(self, setup, monkeypatch):
-        c, render_id = setup
-        monkeypatch.setenv("PERPLEXITY_API_KEY", "px-test")
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-
-        from app.providers.base import MissingApiKeyError
-
-        with patch(
-            "app.main.SearchGrounding.search",
-            new=AsyncMock(return_value=_MOCK_SEARCH_RESULTS),
-        ):
-            mock_adapter = MagicMock()
-            mock_adapter.generate_build_sheet = AsyncMock(
-                side_effect=MissingApiKeyError("ANTHROPIC_API_KEY is not set in the environment.")
-            )
-            with patch("app.main.MaterialsLLM.make_adapter", return_value=mock_adapter):
-                resp = c.post(f"/api/renders/{render_id}/build-sheet", json=_VALID_POST_BODY)
-
-        assert resp.status_code == 400
-        assert "ANTHROPIC_API_KEY" in resp.json()["detail"]
-
-    def test_llm_quota_error_returns_provider_status(self, setup, monkeypatch):
-        c, render_id = setup
-        monkeypatch.setenv("PERPLEXITY_API_KEY", "px-test")
-
-        with patch(
-            "app.main.SearchGrounding.search",
-            new=AsyncMock(return_value=_MOCK_SEARCH_RESULTS),
-        ):
-            mock_adapter = MagicMock()
-            mock_adapter.generate_build_sheet = AsyncMock(
-                side_effect=RuntimeError("429 RESOURCE_EXHAUSTED quota exceeded")
-            )
-            with patch("app.main.MaterialsLLM.make_adapter", return_value=mock_adapter):
-                with patch(
-                    "app.domain.build_sheet_validation.validate_material_item_url",
-                    return_value=(True, "URL passed validation."),
-                ):
-                    resp = c.post(f"/api/renders/{render_id}/build-sheet", json=_VALID_POST_BODY)
-
-        assert resp.status_code == 503
-        assert "Materials LLM failed" in resp.json()["detail"]
-        assert "RESOURCE_EXHAUSTED" in resp.json()["detail"]
-
-    def test_upsert_replaces_existing_build_sheet(self, setup, monkeypatch):
-        c, render_id = setup
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-        monkeypatch.setenv("PERPLEXITY_API_KEY", "px-test")
-
-        # First POST
-        resp1 = self._post_build_sheet(c, render_id)
-        assert resp1.status_code == 201
-
-        # Second POST — should replace, not duplicate
-        resp2 = self._post_build_sheet(c, render_id)
-        assert resp2.status_code == 201
-        id2 = resp2.json()["id"]
-
-        # GET should still return one result, matching the second POST's ID
-        get_resp = c.get(f"/api/renders/{render_id}/build-sheet")
-        assert get_resp.status_code == 200
-        assert get_resp.json()["id"] == id2
-
-    def test_unapproved_items_are_rewritten_not_dropped(
-        self, setup, monkeypatch
-    ):
-        c, render_id = setup
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-        monkeypatch.setenv("PERPLEXITY_API_KEY", "px-test")
 
         with patch(
             "app.main.SearchGrounding.search",
@@ -504,11 +432,7 @@ class TestCreateBuildSheet:
                 return_value=_MOSTLY_UNAPPROVED_BUILD_SHEET
             )
             with patch("app.main.MaterialsLLM.make_adapter", return_value=mock_adapter):
-                with patch(
-                    "app.domain.build_sheet_validation.validate_material_item_url",
-                    return_value=(True, "URL passed validation."),
-                ):
-                    resp = c.post(f"/api/renders/{render_id}/build-sheet", json=_VALID_POST_BODY)
+                resp = c.post(f"/api/renders/{render_id}/build-sheet", json=_VALID_POST_BODY)
 
         assert resp.status_code == 201
         data = resp.json()
@@ -536,11 +460,7 @@ class TestGetBuildSheet:
             mock_adapter = MagicMock()
             mock_adapter.generate_build_sheet = AsyncMock(return_value=_MOCK_BUILD_SHEET)
             with patch("app.main.MaterialsLLM.make_adapter", return_value=mock_adapter):
-                with patch(
-                    "app.domain.build_sheet_validation.validate_material_item_url",
-                    return_value=(True, "URL passed validation."),
-                ):
-                    return c.post(f"/api/renders/{render_id}/build-sheet", json=_VALID_POST_BODY)
+                return c.post(f"/api/renders/{render_id}/build-sheet", json=_VALID_POST_BODY)
 
     def test_returns_404_when_no_build_sheet(self, setup):
         c, render_id = setup

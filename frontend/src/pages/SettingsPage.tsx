@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import TopNav from "../components/TopNav";
+import type { ProviderModels } from "../api/models";
+import { useModelCatalog } from "../hooks/useModelCatalog";
 import {
   SETTINGS_KEYS,
   SettingsKeyName,
@@ -36,6 +38,7 @@ export default function SettingsPage() {
   const [clearing, setClearing] = useState<SettingsKeyName | null>(null);
   const [testStates, setTestStates] =
     useState<Record<SettingsKeyName, TestState>>(EMPTY_TEST_STATES);
+  const models = useModelCatalog();
 
   useEffect(() => {
     listSettingsKeys()
@@ -69,6 +72,7 @@ export default function SettingsPage() {
       updateKey(updated);
       setEditing(null);
       setDraftValue("");
+      void models.refresh();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
@@ -88,6 +92,7 @@ export default function SettingsPage() {
         ...current,
         [name]: { status: "idle" },
       }));
+      void models.refresh();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
@@ -255,7 +260,98 @@ export default function SettingsPage() {
             </div>
           </div>
         )}
+
+        {!loading && (
+          <AvailableModelsPanel
+            providers={[
+              ...models.catalog.image,
+              ...models.catalog.materials,
+              ...models.catalog.grounding,
+            ]}
+            loading={models.loading}
+            error={models.error}
+            onRefresh={() => void models.refresh()}
+          />
+        )}
       </main>
     </div>
+  );
+}
+
+const ROLE_LABELS: Record<ProviderModels["role"], string> = {
+  image: "Renders",
+  materials: "Build Sheet",
+  grounding: "Product research",
+};
+
+function AvailableModelsPanel({
+  providers,
+  loading,
+  error,
+  onRefresh,
+}: {
+  providers: ProviderModels[];
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  return (
+    <section aria-label="Available models" className="mt-8">
+      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold text-foreground">Available models</h2>
+          <p className="text-sm text-muted">
+            Fetched live from each vendor with your keys. Pick a model per request on the
+            project page; these lists show what is currently offered.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={loading}
+          className="px-3 py-2 rounded border border-default text-sm font-medium text-foreground hover:bg-surface disabled:opacity-50"
+        >
+          {loading ? "Refreshing..." : "Refresh models"}
+        </button>
+      </div>
+      {error && (
+        <p className="mb-3 rounded border border-danger bg-surface-elevated px-3 py-2 text-sm text-danger">
+          {error}
+        </p>
+      )}
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        {providers.map((provider) => (
+          <article
+            key={provider.slug}
+            aria-label={`${provider.label} models`}
+            className="rounded border border-default bg-surface-elevated p-4"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="font-semibold text-foreground">{provider.label}</h3>
+              <span className="text-xs text-muted">{ROLE_LABELS[provider.role]}</span>
+            </div>
+            <p className="mt-1 text-xs text-muted">
+              {provider.key_set
+                ? provider.source === "live"
+                  ? `${provider.models.length} models from ${provider.vendor}`
+                  : "Built-in list (vendor list unavailable)"
+                : `${provider.key_env} not set — built-in list`}
+              {provider.error && provider.key_set ? ` · ${provider.error}` : ""}
+            </p>
+            <ul className="mt-2 max-h-40 space-y-0.5 overflow-y-auto text-sm text-foreground">
+              {provider.models.map((m) => (
+                <li key={m.id} className="flex flex-wrap items-baseline gap-2">
+                  <span>{m.display_name}</span>
+                  <code className="text-xs text-muted">{m.id}</code>
+                  {m.id === provider.default_model && (
+                    <span className="text-[11px] uppercase text-accent">default</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </article>
+        ))}
+      </div>
+    </section>
   );
 }

@@ -11,9 +11,8 @@ _APPROVED_RETAILER_LIST = ", ".join(
 )
 
 APPROVED_RETAILER_PROMPT_CONSTRAINT = (
-    "Use only these approved retailers for material vendors and product URLs: "
+    "Use only these approved retailers as material vendors: "
     f"{_APPROVED_RETAILER_LIST}. Do not include Amazon, Wayfair, Walmart, "
     "marketplaces, wholesalers, manufacturer-only pages, or other unapproved retailers. "
-    "When a real product URL is available, it must be from one of the approved retailer domains."
+    "Do not invent product URLs; links are generated automatically."
 )
-

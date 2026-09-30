@@ -202,3 +202,25 @@ describe("SettingsPage", () => {
     });
   });
 });
+
+describe("SettingsPage — available models", () => {
+  it("lists each provider's models with key status", async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      json: async () => settingsRows,
+    });
+
+    renderSettings();
+
+    const panel = await screen.findByRole("region", { name: /Available models/i });
+    const openai = within(panel).getByRole("article", { name: /OpenAI Images models/i });
+    expect(within(openai).getByText("GPT Image 2.5 Flare")).toBeInTheDocument();
+    expect(within(openai).getByText("gpt-image-2.5-sunburst")).toBeInTheDocument();
+    expect(within(openai).getByText(/2 models from openai/i)).toBeInTheDocument();
+
+    const claude = within(panel).getByRole("article", { name: /Anthropic Claude models/i });
+    expect(within(claude).getByText(/ANTHROPIC_API_KEY not set/i)).toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: /Refresh models/i })).toBeInTheDocument();
+  });
+});
+

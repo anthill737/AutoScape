@@ -5,115 +5,26 @@ import os
 
 import anthropic
 
-from app.domain.retailers import APPROVED_RETAILER_PROMPT_CONSTRAINT
 from app.providers.base import MaterialsAdapter, MissingApiKeyError, missing_api_key_message
-
-_MODEL = "claude-sonnet-4-6"
-_MAX_BUILD_SHEET_TOKENS = 8192
-
-_SYSTEM_PROMPT = (
-    """You are a professional landscape contractor and cost estimator.
-Given a rendered design image, project dimensions, quality tier, feature categories,
-and product research data, generate a comprehensive build sheet.
-
-"""
-    + APPROVED_RETAILER_PROMPT_CONSTRAINT
-    + """
-
-Respond with ONLY valid JSON (no markdown, no explanation) matching this exact schema.
-Keep it concise but complete: include 6-10 material items, 6-10 build steps, and 3-6
-concrete assumptions.
-{
-  "material_items": [
-    {
-      "name": "string",
-      "quantity": number,
-      "unit": "string",
-      "unit_cost_range": "string (e.g. '$12 - $15')",
-      "total_cost_range": "string (e.g. '$144 - $180')",
-      "vendor": "string",
-      "product_url": "string (real URL from search results or empty string)",
-      "notes": "string"
-    }
-  ],
-  "tool_list": ["string"],
-  "build_steps": [
-    {
-      "step_number": number,
-      "description": "string",
-      "estimated_time": "string (e.g. '2 hours')",
-      "skill_notes": "string"
-    }
-  ],
-  "total_cost_range": "string (e.g. '$3,500 - $5,200')",
-  "skill_level": "string (Beginner | Intermediate | Advanced)",
-  "assumptions": ["string (include at least 3 concrete assumptions)"]
-}"""
+from app.providers.build_sheet_schema import (
+    BUILD_SHEET_SCHEMA,
+    SYSTEM_PROMPT,
+    build_user_message,
+    image_media_type,
+    strip_code_fences,
 )
+from app.providers.model_catalog import default_model_for
 
-_BUILD_SHEET_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "material_items": {
-            "type": "array",
-            "minItems": 1,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "quantity": {"type": "number"},
-                    "unit": {"type": "string"},
-                    "unit_cost_range": {"type": "string"},
-                    "total_cost_range": {"type": "string"},
-                    "vendor": {"type": "string"},
-                    "product_url": {"type": "string"},
-                    "notes": {"type": "string"},
-                },
-                "required": [
-                    "name",
-                    "quantity",
-                    "unit",
-                    "unit_cost_range",
-                    "total_cost_range",
-                    "vendor",
-                    "product_url",
-                    "notes",
-                ],
-            },
-        },
-        "tool_list": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-        "build_steps": {
-            "type": "array",
-            "minItems": 1,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "step_number": {"type": "number"},
-                    "description": {"type": "string"},
-                    "estimated_time": {"type": "string"},
-                    "skill_notes": {"type": "string"},
-                },
-                "required": [
-                    "step_number",
-                    "description",
-                    "estimated_time",
-                    "skill_notes",
-                ],
-            },
-        },
-        "total_cost_range": {"type": "string"},
-        "skill_level": {"type": "string"},
-        "assumptions": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-    },
-    "required": [
-        "material_items",
-        "tool_list",
-        "build_steps",
-        "total_cost_range",
-        "skill_level",
-        "assumptions",
-    ],
-}
+# Default Anthropic model; any model from the catalog can be passed in.
+_MODEL = default_model_for("claude_sonnet")
+# Adaptive thinking (on by default on current models) draws from this budget too.
+_MAX_BUILD_SHEET_TOKENS = 16000
+
+# Kept as module attributes for existing tests / probe scripts.
+_SYSTEM_PROMPT = SYSTEM_PROMPT
+_BUILD_SHEET_SCHEMA = BUILD_SHEET_SCHEMA
+_build_user_message = build_user_message
+_image_media_type = image_media_type
 
 _DIMENSION_SYSTEM_PROMPT = (
     "You are a landscape design assistant. Given a rendered design image and project details, "
@@ -127,24 +38,6 @@ _DIMENSION_SYSTEM_PROMPT = (
     "- Infer reasonable defaults from the image and lot size\n"
     "- Return only the JSON object, nothing else"
 )
-
-
-def _build_user_message(
-    dimensions: dict,
-    quality_tier: str,
-    search_results: list[dict],
-    feature_categories: list[str],
-) -> str:
-    features_str = ", ".join(feature_categories) if feature_categories else "General landscaping"
-    dims_str = json.dumps(dimensions, indent=2) if dimensions else "{}"
-    search_str = json.dumps(search_results[:25], indent=2) if search_results else "[]"
-    return (
-        f"Feature Categories: {features_str}\n"
-        f"Quality Tier: {quality_tier}\n"
-        f"Project Dimensions:\n{dims_str}\n\n"
-        f"Product Research Data (from Perplexity Search Grounding):\n{search_str}\n\n"
-        "Generate the build sheet JSON based on the rendered design image and the above context."
-    )
 
 
 def _build_dimension_message(
@@ -164,16 +57,20 @@ def _build_dimension_message(
     )
 
 
-def _image_media_type(image_bytes: bytes) -> str:
-    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if image_bytes.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if image_bytes.startswith(b"GIF87a") or image_bytes.startswith(b"GIF89a"):
-        return "image/gif"
-    if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
-        return "image/webp"
-    return "image/jpeg"
+def _image_block(image_b64: str, media_type: str) -> dict:
+    return {
+        "type": "image",
+        "source": {"type": "base64", "media_type": media_type, "data": image_b64},
+    }
+
+
+def _first_text(message) -> str:
+    # Skip thinking blocks (which have no ``text``) and return the first text block.
+    for block in message.content:
+        text = getattr(block, "text", None)
+        if isinstance(text, str) and text.strip():
+            return text
+    return ""
 
 
 async def suggest_dimension_defaults(
@@ -181,8 +78,9 @@ async def suggest_dimension_defaults(
     feature_categories: list[str],
     lot_size_sqft: float | None,
     house_sqft: float | None,
+    model: str | None = None,
 ) -> dict:
-    """Return a dict of dimension field names → numeric string defaults using ClaudeSonnet."""
+    """Return a dict of dimension field names -> numeric string defaults using Claude."""
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise MissingApiKeyError(
@@ -190,47 +88,44 @@ async def suggest_dimension_defaults(
         )
 
     image_b64 = base64.b64encode(render_image_bytes).decode()
-    media_type = _image_media_type(render_image_bytes)
+    media_type = image_media_type(render_image_bytes)
     user_text = _build_dimension_message(feature_categories, lot_size_sqft, house_sqft)
 
     client = anthropic.Anthropic(api_key=api_key)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     raw = await loop.run_in_executor(
         None,
-        lambda: _call_dimension_sync(client, image_b64, media_type, user_text),
+        lambda: _call_dimension_sync(client, image_b64, media_type, user_text, model or _MODEL),
     )
-    return json.loads(raw)
+    return json.loads(strip_code_fences(raw))
 
 
 def _call_dimension_sync(
-    client: anthropic.Anthropic, image_b64: str, media_type: str, user_text: str
+    client: anthropic.Anthropic,
+    image_b64: str,
+    media_type: str,
+    user_text: str,
+    model: str = _MODEL,
 ) -> str:
     message = client.messages.create(
-        model=_MODEL,
-        max_tokens=512,
+        model=model,
+        max_tokens=4096,
         system=_DIMENSION_SYSTEM_PROMPT,
         messages=[
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": image_b64,
-                        },
-                    },
-                    {"type": "text", "text": user_text},
-                ],
+                "content": [_image_block(image_b64, media_type), {"type": "text", "text": user_text}],
             }
         ],
     )
-    return message.content[0].text
+    return _first_text(message)
 
 
 class ClaudeSonnetAdapter(MaterialsAdapter):
-    """Materials LLM adapter for Anthropic claude-sonnet-4-6."""
+    """Materials LLM adapter for Anthropic Claude models."""
+
+    def __init__(self, model: str | None = None) -> None:
+        self.model = model or _MODEL
 
     async def generate_build_sheet(
         self,
@@ -249,68 +144,60 @@ class ClaudeSonnetAdapter(MaterialsAdapter):
             )
 
         image_b64 = base64.b64encode(render_image_bytes).decode()
-        media_type = _image_media_type(render_image_bytes)
-        user_text = _build_user_message(
+        media_type = image_media_type(render_image_bytes)
+        user_text = build_user_message(
             dimensions, quality_tier, search_results, feature_categories
         )
 
         client = anthropic.Anthropic(api_key=api_key)
-        response = await _call_claude(client, image_b64, media_type, user_text)
+        response = await _call_claude(client, image_b64, media_type, user_text, self.model)
         if isinstance(response, dict):
             return response
-        return json.loads(response)
+        return json.loads(strip_code_fences(response))
 
 
 async def _call_claude(
-    client: anthropic.Anthropic, image_b64: str, media_type: str, user_text: str
-) -> str:
-    loop = asyncio.get_event_loop()
+    client: anthropic.Anthropic,
+    image_b64: str,
+    media_type: str,
+    user_text: str,
+    model: str = _MODEL,
+) -> dict | str:
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
-        lambda: _call_claude_sync(client, image_b64, media_type, user_text),
+        lambda: _call_claude_sync(client, image_b64, media_type, user_text, model),
     )
 
 
 def _call_claude_sync(
-    client: anthropic.Anthropic, image_b64: str, media_type: str, user_text: str
+    client: anthropic.Anthropic,
+    image_b64: str,
+    media_type: str,
+    user_text: str,
+    model: str = _MODEL,
 ) -> dict | str:
+    # Structured outputs (output_config.format) guarantee schema-valid JSON in the first
+    # text block. This replaces the old forced tool_choice, which current Claude models
+    # reject with HTTP 400.
     message = client.messages.create(
-        model=_MODEL,
+        model=model,
         max_tokens=_MAX_BUILD_SHEET_TOKENS,
-        system=_SYSTEM_PROMPT,
+        system=SYSTEM_PROMPT,
         messages=[
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": image_b64,
-                        },
-                    },
-                    {
-                        "type": "text",
-                        "text": user_text,
-                    },
-                ],
+                "content": [_image_block(image_b64, media_type), {"type": "text", "text": user_text}],
             }
         ],
-        tools=[
-            {
-                "name": "generate_build_sheet",
-                "description": "Return the structured materials and build-sheet payload.",
-                "input_schema": _BUILD_SHEET_SCHEMA,
-            }
-        ],
-        tool_choice={"type": "tool", "name": "generate_build_sheet"},
+        output_config={"format": {"type": "json_schema", "schema": BUILD_SHEET_SCHEMA}},
     )
-    for block in message.content:
-        if getattr(block, "type", None) == "tool_use":
-            return block.input
+    if getattr(message, "stop_reason", None) == "refusal":
+        details = getattr(message, "stop_details", None)
+        reason = getattr(details, "explanation", None) or "the request was declined"
+        raise ValueError(f"Anthropic Claude refused the request: {reason}")
 
-    text = getattr(message.content[0], "text", "")
+    text = _first_text(message)
     if not text.strip():
         raise ValueError("Anthropic Claude response did not include JSON content")
     return text

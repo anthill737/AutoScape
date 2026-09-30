@@ -1,7 +1,14 @@
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+
+def _clean_model_id(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
 
 
 class RenderOut(BaseModel):
@@ -20,6 +27,7 @@ class DesignRequestOut(BaseModel):
     project_id: int
     parent_render_id: Optional[int] = None
     image_provider: str
+    image_model: Optional[str] = None
     feature_categories: list[str]
     style: str
     quality_tier: str
@@ -32,11 +40,15 @@ class DesignRequestOut(BaseModel):
 
 class DesignRequestCreate(BaseModel):
     image_provider: str
+    # Vendor model id from GET /api/models; None uses the provider's default.
+    image_model: Optional[str] = None
     feature_categories: list[str]
     style: str
     quality_tier: str
     composed_prompt: str
     parent_render_id: Optional[int] = None
+
+    _clean_image_model = field_validator("image_model")(_clean_model_id)
 
 
 class ProjectListItem(BaseModel):
@@ -66,13 +78,21 @@ class ProjectDetail(BaseModel):
 
 class BuildSheetCreate(BaseModel):
     materials_llm: str
+    # Vendor model ids from GET /api/models; None uses each provider's default.
+    materials_model: Optional[str] = None
+    grounding_model: Optional[str] = None
     dimensions: dict[str, Any]
+
+    _clean_materials_model = field_validator("materials_model")(_clean_model_id)
+    _clean_grounding_model = field_validator("grounding_model")(_clean_model_id)
 
 
 class BuildSheetOut(BaseModel):
     id: int
     render_id: int
     materials_llm: str
+    materials_model: Optional[str] = None
+    grounding_model: Optional[str] = None
     material_items: list[dict]
     tool_list: list[Any]
     build_steps: list[dict]
@@ -81,3 +101,27 @@ class BuildSheetOut(BaseModel):
     assumptions: list[Any]
     warning: Optional[str] = None
     created_at: datetime
+
+
+class ModelInfoOut(BaseModel):
+    id: str
+    display_name: str
+
+
+class ProviderModelsOut(BaseModel):
+    slug: str
+    role: str
+    vendor: str
+    label: str
+    key_env: str
+    key_set: bool
+    default_model: str
+    models: list[ModelInfoOut]
+    source: str
+    error: Optional[str] = None
+
+
+class ModelCatalogOut(BaseModel):
+    image: list[ProviderModelsOut]
+    materials: list[ProviderModelsOut]
+    grounding: list[ProviderModelsOut]

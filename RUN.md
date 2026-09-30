@@ -11,17 +11,21 @@ Install the following tools before proceeding:
 
 `uv` and `pnpm` are installed automatically by `AutoScape.bat` on first run — you do **not** need to install them manually before double-clicking.
 
-AutoScape also requires four API keys. For this local install, the launcher/backend read them
-automatically from one file per key in the project-root `secrets/` folder. No separate shell
-environment setup is required before launching. `backend/.env.local` is optional and only used
-for manual local overrides:
+AutoScape uses up to four vendor API keys (pay-per-use developer APIs, not chat
+subscriptions). For this local install, the launcher/backend read them automatically from one
+file per key in the project-root `secrets/` folder. No separate shell environment setup is
+required before launching. `backend/.env.local` is optional and only used for manual local
+overrides:
 
 | Env var | Used for |
 |---------|----------|
-| `GOOGLE_API_KEY` | Gemini Flash Image design renders |
-| `OPENAI_API_KEY` | gpt-image-1 design renders |
-| `ANTHROPIC_API_KEY` | Claude materials / Build Sheet generation |
-| `PERPLEXITY_API_KEY` | Search-grounded materials and product lookup |
+| `GOOGLE_API_KEY` | Gemini image models for renders; Gemini text models for Build Sheets |
+| `OPENAI_API_KEY` | gpt-image models for renders; GPT text models for Build Sheets |
+| `ANTHROPIC_API_KEY` | Claude models for Build Sheets and suggested dimension defaults |
+| `PERPLEXITY_API_KEY` | Agent API web search for product research (required for Build Sheets) |
+
+You only need the keys for the vendors you pick. Renders need at least one of Google/OpenAI;
+Build Sheets need Perplexity plus whichever text vendor you choose.
 
 Verify your Python and Node installs:
 
@@ -97,18 +101,37 @@ Do not create `backend\.env.local` just to provide API keys; the `secrets\` file
 normal source of truth. `backend\.env.local` is only for deliberate local overrides and uses
 standard dotenv `NAME=value` lines if you need that advanced workflow.
 
-All four keys are required for full functionality. Missing keys cause a clear error in the UI
-when that feature is used; the server still starts without them. The absence of
-`backend\.env.local` is not an error when the corresponding key file exists in `secrets\`.
+Missing keys cause a clear error in the UI when that feature is used; the server still starts
+without them. The absence of `backend\.env.local` is not an error when the corresponding key
+file exists in `secrets\`.
+
+### Choosing models
+
+Every request lets you pick the exact vendor model, not just the vendor:
+
+- **Renders**: the project page has an Image Provider radio (OpenAI Images / Google Gemini
+  Images) plus an **Image model** dropdown listing what that vendor currently offers.
+- **Build Sheets**: the Project Dimensions panel has a Materials LLM radio (Anthropic Claude /
+  OpenAI GPT / Google Gemini), a **Materials model** dropdown, and a **Product research model**
+  dropdown for the Perplexity Agent API (which can route to Perplexity's own Sonar or to
+  third-party models such as `openai/...` and `anthropic/...`).
+
+The lists come from `GET /api/models`, which asks each vendor's list-models endpoint with your
+key and caches the answer for ten minutes. When a key is missing or a vendor cannot be reached,
+a built-in fallback list is shown and the dropdown says so. Your last choices are remembered in
+the browser. The Settings page shows every list with a **Refresh models** button, and the
+backend logs a `[models]` warning at startup if a default model has disappeared from a vendor.
+
+Defaults live in `backend/app/providers/model_catalog.py` (`PROVIDERS`). Each Design Request
+and Build Sheet records the model that produced it.
 
 ### Image provider quota guidance
 
-For free-tier use, choose **GptImage** as the default Image Provider when creating Design
-Requests. **GeminiFlashImage** uses Google's Gemini image generation API and may work on the
-available free-tier quota for your key, but reliable use beyond that quota requires billing to be
-enabled on the Google Cloud project tied to `GOOGLE_API_KEY`. If Gemini quota is exhausted or
-billing is not enabled for the needed quota, AutoScape shows a yellow inline warning and you can
-switch the Image Provider dropdown to **GptImage** for the request.
+Google's Gemini image models (`gemini-3.1-flash-image` and friends) have **no free-tier
+quota**; they need billing enabled on the Google Cloud project tied to `GOOGLE_API_KEY`.
+OpenAI image models are pay-per-use as well. If a vendor rejects a request for quota or
+billing reasons, AutoScape shows an inline warning and you can switch the Image Provider or
+model for that request. Gemini *text* models used for Build Sheets do have a free tier.
 
 ---
 
@@ -169,7 +192,7 @@ App available at `http://localhost:5173`
 1. Open `http://localhost:5173` in your browser.
 2. Confirm the Projects list page loads with an empty state (no Projects yet).
 3. Click **New Project**, fill in an address plus lot and house square footage, upload a Site Photo, and submit — the new Project should appear in the list.
-4. Open the Project, click **New Design Request**, choose any Feature Categories, Style, Quality Tier, and Image Provider, then click **Generate Renders**. A successful request shows 3 renders; if a Design Request errors, the UI shows the structured backend `detail` message naming the cause, such as an image-provider quota or API-key problem, instead of an opaque `Request failed: 500`. The backend logs the full traceback with a short `trace_id` when an unexpected route exception occurs.
+4. Open the Project, click **New Design Request**, choose any Feature Categories, Style, Quality Tier, Image Provider, and Image model, then click **Generate Renders**. A successful request shows 3 renders; if a Design Request errors, the UI shows the structured backend `detail` message naming the cause, such as an image-provider quota or API-key problem, instead of an opaque `Request failed: 500`. The backend logs the full traceback with a short `trace_id` when an unexpected route exception occurs.
 
 If the page doesn't load, check that both terminals show no errors and that ports 8000 and 5173 are not already in use.
 

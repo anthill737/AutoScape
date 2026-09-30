@@ -1,68 +1,11 @@
 from __future__ import annotations
 
-import asyncio  # noqa: F401  (kept for test patch targets)
 from copy import deepcopy
 from urllib.parse import quote, quote_plus, urlparse
 
 from app.domain.retailers import APPROVED_RETAILERS
-from app.domain.url_validator import validate_material_item_url  # noqa: F401
 
 _APPROVED_DOMAINS = {retailer["domain"] for retailer in APPROVED_RETAILERS}
-
-
-def _is_approved_product_url(value: object) -> bool:
-    if not isinstance(value, str) or not value.strip():
-        return False
-
-    host = urlparse(value.strip()).hostname
-    if not host:
-        return False
-
-    normalized_host = host.removeprefix("www.").lower()
-    return normalized_host in _APPROVED_DOMAINS
-
-
-def validate_build_sheet_approved_retailers(draft: dict) -> dict:
-    """Remove material items whose product URLs are outside approved retailers."""
-
-    result = deepcopy(draft)
-    material_items = result.get("material_items", [])
-    if not isinstance(material_items, list):
-        result["material_items"] = []
-        return result
-
-    approved_items = [
-        item
-        for item in material_items
-        if isinstance(item, dict) and _is_approved_product_url(item.get("product_url"))
-    ]
-    dropped_count = len(material_items) - len(approved_items)
-    result["material_items"] = approved_items
-
-    if dropped_count <= 0:
-        result.pop("warning", None)
-        return result
-
-    assumptions = result.get("assumptions", [])
-    if not isinstance(assumptions, list):
-        assumptions = []
-    item_word = "item" if dropped_count == 1 else "items"
-    verb = "was" if dropped_count == 1 else "were"
-    assumptions.append(
-        f"{dropped_count} {item_word} from unapproved retailers {verb} omitted."
-    )
-    result["assumptions"] = assumptions
-
-    if dropped_count > len(material_items) / 2:
-        result["warning"] = (
-            "More than half of the generated material items were omitted because "
-            "they did not reference approved retailers."
-        )
-    else:
-        result.pop("warning", None)
-
-    return result
-
 
 # ---------------------------------------------------------------------------
 # Working product links
@@ -72,6 +15,7 @@ def validate_build_sheet_approved_retailers(draft: dict) -> dict:
 # than validate-and-drop them (which leaves the build sheet empty), we point
 # every material at the retailer's SEARCH results for that item name. Those
 # links always resolve in a browser and land the user on relevant products.
+# The prompts therefore tell the model to leave product_url empty.
 
 _DEFAULT_DOMAIN = "homedepot.com"
 _DOMAIN_DISPLAY = {retailer["domain"]: retailer["name"] for retailer in APPROVED_RETAILERS}

@@ -168,7 +168,7 @@ async def test_gpt_image_adapter_preserves_jpeg_input_mime(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_gpt_image_adapter_requests_gpt_image_2_medium_quality(monkeypatch):
+async def test_gpt_image_adapter_requests_default_model_medium_quality(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     edit = AsyncMock(
         return_value=SimpleNamespace(
@@ -187,8 +187,9 @@ async def test_gpt_image_adapter_requests_gpt_image_2_medium_quality(monkeypatch
         )
 
     kwargs = edit.call_args.kwargs
-    assert kwargs["model"] == "gpt-image-2"
-    assert _GPT_IMAGE_MODEL == "gpt-image-2"
+    assert kwargs["model"] == _GPT_IMAGE_MODEL
+    assert _GPT_IMAGE_MODEL.startswith("gpt-image-2.5")
+    assert kwargs["n"] == 3
     assert kwargs["quality"] == "medium"
     assert "input_fidelity" not in kwargs
     assert "add a cedar deck" in kwargs["prompt"]
@@ -214,7 +215,7 @@ async def test_gemini_adapter_preserves_png_input_mime(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_gemini_adapter_uses_current_pro_image_model_and_enhanced_prompt():
+async def test_gemini_adapter_uses_default_image_model_and_enhanced_prompt():
     captured = {}
 
     def generate_content(**kwargs):
@@ -238,7 +239,8 @@ async def test_gemini_adapter_uses_current_pro_image_model_and_enhanced_prompt()
     )
 
     assert output == b"image"
-    assert captured["model"] == "gemini-3-pro-image-preview"
+    assert captured["model"] == _GEMINI_MODEL
+    assert _GEMINI_MODEL == "gemini-3.1-flash-image"
     assert captured["config"].response_modalities == ["IMAGE"]
     assert captured["config"].media_resolution is None
     prompt_part = captured["contents"][0].parts[1].text
@@ -246,6 +248,53 @@ async def test_gemini_adapter_uses_current_pro_image_model_and_enhanced_prompt()
     assert image_part.inline_data.mime_type == "image/jpeg"
     assert "add a stone patio" in prompt_part
     assert "photorealistic" in prompt_part
+
+
+@pytest.mark.asyncio
+async def test_gemini_adapter_honors_model_override():
+    captured = {}
+
+    def generate_content(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            candidates=[
+                SimpleNamespace(
+                    content=SimpleNamespace(
+                        parts=[SimpleNamespace(inline_data=SimpleNamespace(data=b"image"))]
+                    )
+                )
+            ]
+        )
+
+    client = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+    await GeminiFlashImageAdapter(model="gemini-3-pro-image")._generate_one(
+        client, _FAKE_JPEG, "image/jpeg", "prompt"
+    )
+
+    assert captured["model"] == "gemini-3-pro-image"
+
+
+@pytest.mark.asyncio
+async def test_gpt_image_adapter_honors_model_override(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    edit = AsyncMock(
+        return_value=SimpleNamespace(
+            data=[SimpleNamespace(b64_json=base64.b64encode(b"x").decode(), url=None)] * 3
+        )
+    )
+    mock_client = SimpleNamespace(images=SimpleNamespace(edit=edit))
+
+    with patch("app.providers.gpt_image.AsyncOpenAI", return_value=mock_client):
+        await GptImageAdapter(model="gpt-image-2.5-sunburst").generate(
+            base64.b64encode(_FAKE_JPEG).decode(), "add a deck"
+        )
+
+    assert edit.call_args.kwargs["model"] == "gpt-image-2.5-sunburst"
+
+
+def test_make_adapter_passes_model_through():
+    assert ImageProvider.GptImage.make_adapter(model="gpt-image-2").model == "gpt-image-2"
+    assert ImageProvider.GeminiFlashImage.make_adapter().model == _GEMINI_MODEL
 
 
 @pytest.mark.asyncio

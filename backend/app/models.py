@@ -44,6 +44,8 @@ class DesignRequest(Base):
         nullable=True,
     )
     image_provider = Column(String, nullable=False)
+    # Concrete vendor model id used for this request (None = vendor default at the time).
+    image_model = Column(String, nullable=True)
     feature_categories = Column(JSON, nullable=False)
     style = Column(String, nullable=False)
     quality_tier = Column(String, nullable=False)
@@ -88,6 +90,9 @@ class BuildSheet(Base):
     id = Column(Integer, primary_key=True)
     render_id = Column(Integer, ForeignKey("render.id"), nullable=False)
     materials_llm = Column(String, nullable=False)
+    # Concrete vendor model ids used for this sheet (None = vendor default at the time).
+    materials_model = Column(String, nullable=True)
+    grounding_model = Column(String, nullable=True)
     content_json = Column(Text, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 

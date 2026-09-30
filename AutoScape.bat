@@ -130,6 +130,14 @@ set "FLOG_CHILD=..\%LOGDIR%\ascape_front.log"
 type nul > "%BLOG%"
 type nul > "%FLOG%"
 
+:: ---- Stop stale servers from a previous launch ----
+:: Ctrl+C or a crash can orphan uvicorn/vite; a leftover listener would make this
+:: run silently pick a different backend port. The script only kills processes
+:: whose command line identifies them as AutoScape's own uvicorn/vite processes.
+if exist "scripts\stop_stale_servers.ps1" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\stop_stale_servers.ps1"
+)
+
 :: ---- Port probe: find first free port in 8000-8010 ----
 :: Write a temporary Python script into .runtime and run it to probe TCP ports.
 (

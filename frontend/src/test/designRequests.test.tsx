@@ -83,11 +83,68 @@ describe("ProjectDetailPage — Design Request form controls", () => {
   it("shows Image Provider radio buttons", async () => {
     await openForm();
     expect(
-      screen.getByRole("radio", { name: /Gemini 3 Pro Image/i }),
+      screen.getByRole("radio", { name: /Google Gemini Images/i }),
     ).toBeInTheDocument();
-    const gptImage = screen.getByRole("radio", { name: /GptImage/i });
+    const gptImage = screen.getByRole("radio", { name: /OpenAI Images/i });
     expect(gptImage).toBeInTheDocument();
     expect(gptImage).toBeChecked();
+  });
+
+  it("shows the image model dropdown for the selected provider and follows provider changes", async () => {
+    await openForm();
+    const select = (await screen.findByRole("combobox", {
+      name: /Image model/i,
+    })) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("gpt-image-2.5-flare"));
+    expect(
+      within(select).getByRole("option", { name: /GPT Image 2.5 Sunburst/i }),
+    ).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("radio", { name: /Google Gemini Images/i }));
+    await waitFor(() => expect(select.value).toBe("gemini-3.1-flash-image"));
+    expect(within(select).getByRole("option", { name: /Nano Banana Pro/i })).toBeInTheDocument();
+  });
+
+  it("posts the chosen image model and remembers it in localStorage", async () => {
+    await openForm();
+    const select = (await screen.findByRole("combobox", {
+      name: /Image model/i,
+    })) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("gpt-image-2.5-flare"));
+    await userEvent.selectOptions(select, "gpt-image-2.5-sunburst");
+
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        id: 7,
+        project_id: 1,
+        parent_render_id: null,
+        image_provider: "gpt_image",
+        image_model: "gpt-image-2.5-sunburst",
+        feature_categories: [],
+        style: "Modern",
+        quality_tier: "Budget",
+        composed_prompt: "x",
+        created_at: "2024-06-01T00:00:00Z",
+        renders: [],
+      }),
+    });
+    await userEvent.click(screen.getByRole("button", { name: /Generate Renders/i }));
+
+    await waitFor(() => {
+      const postCall = (fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([url, init]) =>
+          url === "/api/projects/1/design-requests" &&
+          (init as RequestInit | undefined)?.method === "POST",
+      );
+      expect(postCall).toBeDefined();
+      const body = JSON.parse((postCall?.[1] as RequestInit).body as string);
+      expect(body.image_provider).toBe("gpt_image");
+      expect(body.image_model).toBe("gpt-image-2.5-sunburst");
+    });
+
+    const saved = JSON.parse(window.localStorage.getItem("autoscape.models.v1") ?? "{}");
+    expect(saved.imageModels).toEqual({ gpt_image: "gpt-image-2.5-sunburst" });
   });
 
   it("shows all 7 Feature Category checkboxes", async () => {
@@ -1329,7 +1386,7 @@ describe("ProjectDetailPage — Hero section", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Design Request #2 · Render 2 of 3 · Rustic · Mid-range · Deck · Gemini 3 Pro Image",
+        "Design Request #2 · Render 2 of 3 · Rustic · Mid-range · Deck · Google Gemini Images",
       ),
     ).toBeInTheDocument();
     expect(screen.getByText("Chosen")).toBeInTheDocument();
@@ -1349,7 +1406,7 @@ describe("ProjectDetailPage — Hero section", () => {
 
     expect(
       screen.getByText(
-        "Design Request #2 · Render 3 of 3 · Rustic · Mid-range · Deck · Gemini 3 Pro Image",
+        "Design Request #2 · Render 3 of 3 · Rustic · Mid-range · Deck · Google Gemini Images",
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText("Chosen")).not.toBeInTheDocument();
@@ -1547,7 +1604,7 @@ describe("ProjectDetailPage — Project Dimensions section", () => {
     expect(widthInput).toHaveValue(20);
   });
 
-  it("shows Materials LLM picker with Claude Sonnet 4.6 selected by default", async () => {
+  it("shows Materials LLM picker with Anthropic Claude selected by default", async () => {
     (fetch as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce({ ok: true, json: async () => projectWithDeckChosen })
       .mockResolvedValueOnce({ ok: true, json: async () => deckDefaults });
@@ -1558,9 +1615,37 @@ describe("ProjectDetailPage — Project Dimensions section", () => {
       expect(screen.getByText("Project Dimensions")).toBeInTheDocument();
     });
 
-    expect(screen.getByRole("radio", { name: /Claude Sonnet 4\.6/i })).toBeChecked();
-    expect(screen.getByRole("radio", { name: /GPT-5/i })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /Gemini 2\.5 Pro/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Anthropic Claude/i })).toBeChecked();
+    expect(screen.getByRole("radio", { name: /OpenAI GPT/i })).toBeInTheDocument();
+    // Exact match: "Google Gemini Images" is the image-provider radio in the header strip.
+    expect(screen.getByRole("radio", { name: /^Google Gemini$/i })).toBeInTheDocument();
+  });
+
+  it("shows materials and product-research model dropdowns that follow the selected provider", async () => {
+    (fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ ok: true, json: async () => projectWithDeckChosen })
+      .mockResolvedValueOnce({ ok: true, json: async () => deckDefaults });
+
+    renderAt("/projects/1");
+
+    const materials = (await screen.findByRole("combobox", {
+      name: /Materials model/i,
+    })) as HTMLSelectElement;
+    await waitFor(() => expect(materials.value).toBe("claude-opus-5-5"));
+    // The mocked catalog reports the Anthropic key missing.
+    expect(screen.getByText(/ANTHROPIC_API_KEY not set/i)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("radio", { name: /OpenAI GPT/i }));
+    await waitFor(() => expect(materials.value).toBe("gpt-5.6-terra"));
+    expect(within(materials).getByRole("option", { name: /GPT 6 Luna/i })).toBeInTheDocument();
+
+    const grounding = screen.getByRole("combobox", {
+      name: /Product research model/i,
+    }) as HTMLSelectElement;
+    expect(grounding.value).toBe("perplexity/sonar");
+    expect(
+      within(grounding).getByRole("option", { name: /GPT 5.6 Luna/i }),
+    ).toBeInTheDocument();
   });
 
   it("Generate Build Sheet button is disabled when dimension fields are empty", async () => {
@@ -1919,7 +2004,16 @@ describe("ProjectDetailPage — Build Sheet display", () => {
       expect(screen.getByRole("button", { name: /Generate Build Sheet/i })).not.toBeDisabled();
     });
 
-    await userEvent.click(screen.getByRole("radio", { name: /GPT-5/i }));
+    await userEvent.click(screen.getByRole("radio", { name: /OpenAI GPT/i }));
+    const materialsSelect = screen.getByRole("combobox", {
+      name: /Materials model/i,
+    }) as HTMLSelectElement;
+    await waitFor(() => expect(materialsSelect.value).toBe("gpt-5.6-terra"));
+    await userEvent.selectOptions(materialsSelect, "gpt-6-luna");
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: /Product research model/i }),
+      "openai/gpt-5.6-luna",
+    );
     await userEvent.click(screen.getByRole("button", { name: /Generate Build Sheet/i }));
 
     expect(screen.getByRole("button", { name: /Generating Build Sheet/i })).toBeDisabled();
@@ -1939,8 +2033,14 @@ describe("ProjectDetailPage — Build Sheet display", () => {
     });
     expect(JSON.parse((postCall?.[1] as RequestInit).body as string)).toEqual({
       materials_llm: "gpt5",
+      materials_model: "gpt-6-luna",
+      grounding_model: "openai/gpt-5.6-luna",
       dimensions: deckDefaults,
     });
+    const saved = JSON.parse(window.localStorage.getItem("autoscape.models.v1") ?? "{}");
+    expect(saved.materialsProvider).toBe("gpt5");
+    expect(saved.materialsModels).toEqual({ gpt5: "gpt-6-luna" });
+    expect(saved.groundingModel).toBe("openai/gpt-5.6-luna");
 
     resolveBuildSheet(richBuildSheet);
 

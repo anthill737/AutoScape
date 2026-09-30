@@ -2,12 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { getProject, ProjectDetail } from "../api/projects";
 import { ApiError } from "../api/errors";
+import { findProvider, ModelCatalog, ProviderModels } from "../api/models";
 import {
   IMAGE_PROVIDERS,
   FEATURE_CATEGORIES,
   STYLES,
   QUALITY_TIERS,
   MATERIALS_LLMS,
+  DEFAULT_MATERIALS_LLM,
   DesignRequestOut,
   RenderOut,
   BuildSheetOut,
@@ -22,6 +24,13 @@ import {
   createBuildSheet,
 } from "../api/designRequests";
 import { exportBuildSheet } from "../utils/exportBuildSheet";
+import {
+  loadModelSelection,
+  resolveSelectedModel,
+  saveModelSelection,
+} from "../utils/modelSelection";
+import { useModelCatalog } from "../hooks/useModelCatalog";
+import ModelPicker from "../components/ModelPicker";
 import TopNav from "../components/TopNav";
 
 function sortDesignRequestsNewestFirst(
@@ -35,6 +44,20 @@ function sortDesignRequestsNewestFirst(
 
 function formatImageProvider(value: string): string {
   return IMAGE_PROVIDERS.find((provider) => provider.value === value)?.label ?? value;
+}
+
+/** "Google Gemini Images (gemini-3.1-flash-image)" when the model is known. */
+function formatImageProviderWithModel(dr: DesignRequestOut): string {
+  const label = formatImageProvider(dr.image_provider);
+  return dr.image_model ? `${label} (${dr.image_model})` : label;
+}
+
+function isKnownImageProvider(value: string | undefined): value is string {
+  return !!value && IMAGE_PROVIDERS.some((provider) => provider.value === value);
+}
+
+function isKnownMaterialsLlm(value: string | undefined): value is string {
+  return !!value && MATERIALS_LLMS.some((llm) => llm.value === value);
 }
 
 function formatSubmittedTimestamp(value: string): string {
@@ -159,7 +182,7 @@ function getHeroLabel(context: ActiveRenderContext): string {
     context.dr.style,
     context.dr.quality_tier,
     formatFeatureCategories(context.dr.feature_categories),
-    formatImageProvider(context.dr.image_provider),
+    formatImageProviderWithModel(context.dr),
   ].join(" · ");
 }
 
@@ -188,9 +211,28 @@ export default function ProjectDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Model catalog (what each vendor currently offers) + remembered choices
+  const { catalog: modelCatalog, loading: modelsLoading } = useModelCatalog();
+  const savedSelectionRef = useRef(loadModelSelection());
+  const savedSelection = savedSelectionRef.current;
+
   // Design Request form state
   const [showForm, setShowForm] = useState(false);
-  const [imageProvider, setImageProvider] = useState<string>(IMAGE_PROVIDERS[0].value);
+  const [imageProvider, setImageProvider] = useState<string>(
+    isKnownImageProvider(savedSelection.imageProvider)
+      ? savedSelection.imageProvider
+      : IMAGE_PROVIDERS[0].value,
+  );
+  // Chosen model per provider slug, so switching providers back and forth keeps each pick.
+  const [imageModels, setImageModels] = useState<Record<string, string>>(
+    savedSelection.imageModels ?? {},
+  );
+  const [materialsModels, setMaterialsModels] = useState<Record<string, string>>(
+    savedSelection.materialsModels ?? {},
+  );
+  const [groundingModel, setGroundingModel] = useState<string>(
+    savedSelection.groundingModel ?? "",
+  );
   const [featureCategories, setFeatureCategories] = useState<string[]>([]);
   const [style, setStyle] = useState<string>(STYLES[0]);
   const [qualityTier, setQualityTier] = useState<string>(QUALITY_TIERS[0]);
@@ -205,6 +247,47 @@ export default function ProjectDetailPage() {
     {},
   );
   const [materialsLlmByRender, setMaterialsLlmByRender] = useState<Record<number, string>>({});
+  const defaultMaterialsLlm = isKnownMaterialsLlm(savedSelection.materialsProvider)
+    ? savedSelection.materialsProvider
+    : DEFAULT_MATERIALS_LLM;
+
+  const imageProviderEntry = findProvider(modelCatalog, imageProvider);
+  const imageModel = resolveSelectedModel(imageProviderEntry, imageModels[imageProvider]);
+  const groundingProviderEntry: ProviderModels | undefined = modelCatalog.grounding[0];
+  const resolvedGroundingModel = resolveSelectedModel(groundingProviderEntry, groundingModel);
+
+  function materialsLlmFor(renderId: number): string {
+    return materialsLlmByRender[renderId] ?? defaultMaterialsLlm;
+  }
+
+  function materialsModelFor(llm: string): string {
+    return resolveSelectedModel(findProvider(modelCatalog, llm), materialsModels[llm]);
+  }
+
+  function changeImageProvider(value: string) {
+    setImageProvider(value);
+    saveModelSelection({ imageProvider: value });
+  }
+
+  function changeImageModel(modelId: string) {
+    setImageModels((prev) => ({ ...prev, [imageProvider]: modelId }));
+    saveModelSelection({ imageModels: { [imageProvider]: modelId } });
+  }
+
+  function changeMaterialsLlm(renderId: number, value: string) {
+    setMaterialsLlmByRender((prev) => ({ ...prev, [renderId]: value }));
+    saveModelSelection({ materialsProvider: value });
+  }
+
+  function changeMaterialsModel(llm: string, modelId: string) {
+    setMaterialsModels((prev) => ({ ...prev, [llm]: modelId }));
+    saveModelSelection({ materialsModels: { [llm]: modelId } });
+  }
+
+  function changeGroundingModel(modelId: string) {
+    setGroundingModel(modelId);
+    saveModelSelection({ groundingModel: modelId });
+  }
   const [generatingForRender, setGeneratingForRender] = useState<number | null>(null);
   const [buildSheetErrors, setBuildSheetErrors] = useState<Record<number, string>>({});
   const [buildSheets, setBuildSheets] = useState<Record<number, BuildSheetOut>>({});
@@ -358,7 +441,12 @@ export default function ProjectDetailPage() {
   }
 
   function openIterateForm(render: RenderOut, dr: DesignRequestOut) {
-    setImageProvider(dr.image_provider);
+    if (isKnownImageProvider(dr.image_provider)) {
+      setImageProvider(dr.image_provider);
+      if (dr.image_model) {
+        setImageModels((prev) => ({ ...prev, [dr.image_provider]: dr.image_model as string }));
+      }
+    }
     setFeatureCategories([...dr.feature_categories]);
     setStyle(dr.style);
     setQualityTier(dr.quality_tier);
@@ -399,6 +487,7 @@ export default function ProjectDetailPage() {
     try {
       const dr = await createDesignRequest(Number(id), {
         image_provider: imageProvider,
+        image_model: imageModel || null,
         feature_categories: featureCategories,
         style,
         quality_tier: qualityTier,
@@ -448,7 +537,7 @@ export default function ProjectDetailPage() {
   }
 
   async function handleGenerateBuildSheet(renderId: number) {
-    const llm = materialsLlmByRender[renderId] ?? "claude_sonnet";
+    const llm = materialsLlmFor(renderId);
     const dims = dimensionValues[renderId] ?? {};
     setGeneratingForRender(renderId);
     setBuildSheetErrors((prev) => {
@@ -457,7 +546,10 @@ export default function ProjectDetailPage() {
       return next;
     });
     try {
-      const bs = await createBuildSheet(renderId, llm, dims);
+      const bs = await createBuildSheet(renderId, llm, dims, {
+        materialsModel: materialsModelFor(llm) || null,
+        groundingModel: resolvedGroundingModel || null,
+      });
       setBuildSheets((prev) => ({ ...prev, [renderId]: bs }));
     } catch (e: unknown) {
       setBuildSheetErrors((prev) => ({
@@ -527,10 +619,14 @@ export default function ProjectDetailPage() {
             <ProjectHeaderStrip
               project={project}
               imageProvider={imageProvider}
+              imageProviderEntry={imageProviderEntry}
+              imageModel={imageModel}
+              modelsLoading={modelsLoading}
               featureCategories={featureCategories}
               style={style}
               qualityTier={qualityTier}
-              onImageProviderChange={setImageProvider}
+              onImageProviderChange={changeImageProvider}
+              onImageModelChange={changeImageModel}
               onToggleCategory={toggleCategory}
               onStyleChange={setStyle}
               onQualityTierChange={setQualityTier}
@@ -541,9 +637,11 @@ export default function ProjectDetailPage() {
                 context={activeContext}
                 buildSheet={buildSheets[activeContext.render.id] ?? null}
                 dimensionValues={dimensionValues[activeContext.render.id] ?? {}}
-                materialsLlm={
-                  materialsLlmByRender[activeContext.render.id] ?? "claude_sonnet"
-                }
+                materialsLlm={materialsLlmFor(activeContext.render.id)}
+                materialsModel={materialsModelFor(materialsLlmFor(activeContext.render.id))}
+                groundingModel={resolvedGroundingModel}
+                modelCatalog={modelCatalog}
+                modelsLoading={modelsLoading}
                 generating={generatingForRender === activeContext.render.id}
                 error={buildSheetErrors[activeContext.render.id] ?? null}
                 onChoose={() =>
@@ -561,12 +659,11 @@ export default function ProjectDetailPage() {
                     },
                   }))
                 }
-                onLlmChange={(value) =>
-                  setMaterialsLlmByRender((prev) => ({
-                    ...prev,
-                    [activeContext.render.id]: value,
-                  }))
+                onLlmChange={(value) => changeMaterialsLlm(activeContext.render.id, value)}
+                onMaterialsModelChange={(modelId) =>
+                  changeMaterialsModel(materialsLlmFor(activeContext.render.id), modelId)
                 }
+                onGroundingModelChange={changeGroundingModel}
                 onGenerateBuildSheet={() =>
                   handleGenerateBuildSheet(activeContext.render.id)
                 }
@@ -695,12 +792,18 @@ interface HeroSectionProps {
   buildSheet: BuildSheetOut | null;
   dimensionValues: Record<string, string>;
   materialsLlm: string;
+  materialsModel: string;
+  groundingModel: string;
+  modelCatalog: ModelCatalog;
+  modelsLoading: boolean;
   generating: boolean;
   error: string | null;
   onChoose: () => void;
   onIterate: () => void;
   onDimensionChange: (key: string, value: string) => void;
   onLlmChange: (value: string) => void;
+  onMaterialsModelChange: (modelId: string) => void;
+  onGroundingModelChange: (modelId: string) => void;
   onGenerateBuildSheet: () => void;
   onRegenerate: () => void;
 }
@@ -710,12 +813,18 @@ function HeroSection({
   buildSheet,
   dimensionValues,
   materialsLlm,
+  materialsModel,
+  groundingModel,
+  modelCatalog,
+  modelsLoading,
   generating,
   error,
   onChoose,
   onIterate,
   onDimensionChange,
   onLlmChange,
+  onMaterialsModelChange,
+  onGroundingModelChange,
   onGenerateBuildSheet,
   onRegenerate,
 }: HeroSectionProps) {
@@ -873,11 +982,17 @@ function HeroSection({
             chosenRenderId={context.render.id}
             dimensionValues={dimensionValues}
             materialsLlm={materialsLlm}
+            materialsModel={materialsModel}
+            groundingModel={groundingModel}
+            modelCatalog={modelCatalog}
+            modelsLoading={modelsLoading}
             generating={generating}
             error={error}
             buildSheet={buildSheet}
             onDimensionChange={onDimensionChange}
             onLlmChange={onLlmChange}
+            onMaterialsModelChange={onMaterialsModelChange}
+            onGroundingModelChange={onGroundingModelChange}
             onGenerate={onGenerateBuildSheet}
           />
         </aside>
@@ -912,10 +1027,14 @@ function HeroSection({
 interface ProjectHeaderStripProps {
   project: ProjectDetail;
   imageProvider: string;
+  imageProviderEntry: ProviderModels | undefined;
+  imageModel: string;
+  modelsLoading: boolean;
   featureCategories: string[];
   style: string;
   qualityTier: string;
   onImageProviderChange: (value: string) => void;
+  onImageModelChange: (modelId: string) => void;
   onToggleCategory: (category: string) => void;
   onStyleChange: (value: string) => void;
   onQualityTierChange: (value: string) => void;
@@ -924,10 +1043,14 @@ interface ProjectHeaderStripProps {
 function ProjectHeaderStrip({
   project,
   imageProvider,
+  imageProviderEntry,
+  imageModel,
+  modelsLoading,
   featureCategories,
   style,
   qualityTier,
   onImageProviderChange,
+  onImageModelChange,
   onToggleCategory,
   onStyleChange,
   onQualityTierChange,
@@ -996,9 +1119,18 @@ function ProjectHeaderStrip({
                       onChange={() => onImageProviderChange(provider.value)}
                       className="h-3.5 w-3.5"
                     />
-                    {provider.label} provider
+                    {provider.label}
                   </label>
                 ))}
+              </div>
+              <div className="mt-2">
+                <ModelPicker
+                  label="Image model"
+                  provider={imageProviderEntry}
+                  value={imageModel}
+                  loading={modelsLoading}
+                  onChange={onImageModelChange}
+                />
               </div>
             </fieldset>
 
@@ -1272,7 +1404,7 @@ function DesignRequestCard({
               Image Provider
             </dt>
             <dd className="text-foreground">
-              {formatImageProvider(dr.image_provider)}
+              {formatImageProviderWithModel(dr)}
             </dd>
           </div>
         </dl>
@@ -1424,11 +1556,17 @@ interface ProjectDimensionsPanelProps {
   chosenRenderId: number;
   dimensionValues: Record<string, string>;
   materialsLlm: string;
+  materialsModel: string;
+  groundingModel: string;
+  modelCatalog: ModelCatalog;
+  modelsLoading: boolean;
   generating: boolean;
   error: string | null;
   buildSheet: BuildSheetOut | null;
   onDimensionChange: (key: string, value: string) => void;
   onLlmChange: (value: string) => void;
+  onMaterialsModelChange: (modelId: string) => void;
+  onGroundingModelChange: (modelId: string) => void;
   onGenerate: () => void;
 }
 
@@ -1437,13 +1575,21 @@ function ProjectDimensionsPanel({
   chosenRenderId,
   dimensionValues,
   materialsLlm,
+  materialsModel,
+  groundingModel,
+  modelCatalog,
+  modelsLoading,
   generating,
   error,
   buildSheet,
   onDimensionChange,
   onLlmChange,
+  onMaterialsModelChange,
+  onGroundingModelChange,
   onGenerate,
 }: ProjectDimensionsPanelProps) {
+  const materialsProviderEntry = findProvider(modelCatalog, materialsLlm);
+  const groundingProviderEntry = modelCatalog.grounding[0];
   const fields = getDimensionFieldsForCategories(dr.feature_categories);
   const allFilled =
     fields.length === 0 ||
@@ -1499,6 +1645,22 @@ function ProjectDimensionsPanel({
               {opt.label}
             </label>
           ))}
+        </div>
+        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <ModelPicker
+            label="Materials model"
+            provider={materialsProviderEntry}
+            value={materialsModel}
+            loading={modelsLoading}
+            onChange={onMaterialsModelChange}
+          />
+          <ModelPicker
+            label="Product research model"
+            provider={groundingProviderEntry}
+            value={groundingModel}
+            loading={modelsLoading}
+            onChange={onGroundingModelChange}
+          />
         </div>
       </fieldset>
 

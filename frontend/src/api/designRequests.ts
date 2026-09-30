@@ -1,8 +1,10 @@
 import { ApiError, parseApiError } from "./errors";
 
+// Provider slugs are stable API/database values; the concrete model within a vendor is
+// chosen per request from GET /api/models (see src/api/models.ts).
 export const IMAGE_PROVIDERS = [
-  { value: "gpt_image", label: "GptImage" },
-  { value: "gemini_flash_image", label: "Gemini 3 Pro Image" },
+  { value: "gpt_image", label: "OpenAI Images" },
+  { value: "gemini_flash_image", label: "Google Gemini Images" },
 ] as const;
 export type ImageProvider = (typeof IMAGE_PROVIDERS)[number]["value"];
 
@@ -31,10 +33,11 @@ export const QUALITY_TIERS = ["Budget", "Mid-range", "Premium"] as const;
 export type QualityTier = (typeof QUALITY_TIERS)[number];
 
 export const MATERIALS_LLMS = [
-  { value: "claude_sonnet", label: "Claude Sonnet 4.6" },
-  { value: "gpt5", label: "GPT-5" },
-  { value: "gemini_pro", label: "Gemini 2.5 Pro" },
+  { value: "claude_sonnet", label: "Anthropic Claude" },
+  { value: "gpt5", label: "OpenAI GPT" },
+  { value: "gemini_pro", label: "Google Gemini" },
 ] as const;
+export const DEFAULT_MATERIALS_LLM: string = MATERIALS_LLMS[0].value;
 
 // TypeScript interfaces matching backend schemas
 export interface RenderOut {
@@ -51,6 +54,8 @@ export interface DesignRequestOut {
   project_id: number;
   parent_render_id: number | null;
   image_provider: string;
+  /** Vendor model id that produced the renders; absent on rows from older versions. */
+  image_model?: string | null;
   feature_categories: string[];
   style: string;
   quality_tier: string;
@@ -81,6 +86,8 @@ export interface BuildSheetOut {
   id: number;
   render_id: number;
   materials_llm: string;
+  materials_model?: string | null;
+  grounding_model?: string | null;
   material_items: MaterialItem[];
   tool_list: string[];
   build_steps: BuildStep[];
@@ -161,6 +168,7 @@ export async function createDesignRequest(
   projectId: number,
   data: {
     image_provider: string;
+    image_model?: string | null;
     feature_categories: string[];
     style: string;
     quality_tier: string;
@@ -207,15 +215,24 @@ export async function getBuildSheet(renderId: number): Promise<BuildSheetOut> {
   return res.json() as Promise<BuildSheetOut>;
 }
 
+export interface BuildSheetModelChoices {
+  materialsModel?: string | null;
+  groundingModel?: string | null;
+}
+
 export async function createBuildSheet(
   renderId: number,
   materialsLlm: string,
   dimensions: Record<string, string>,
+  models: BuildSheetModelChoices = {},
 ): Promise<BuildSheetOut> {
+  const body: Record<string, unknown> = { materials_llm: materialsLlm, dimensions };
+  if (models.materialsModel) body.materials_model = models.materialsModel;
+  if (models.groundingModel) body.grounding_model = models.groundingModel;
   const res = await fetch(`/api/renders/${renderId}/build-sheet`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ materials_llm: materialsLlm, dimensions }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     throw new Error(await parseApiError(res));

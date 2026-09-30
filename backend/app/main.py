@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import logging
@@ -24,12 +25,15 @@ from app.providers.claude_sonnet import suggest_dimension_defaults
 from app.providers.exceptions import ImageProviderAuthError, ImageProviderQuotaError
 from app.providers.image_provider import ImageProvider
 from app.providers.materials_llm import MaterialsLLM
+from app.providers.model_catalog import catalog as model_catalog
+from app.providers.model_catalog import default_model_for
 from app.providers.search_grounding import SearchGrounding
 from app.schemas import (
     BuildSheetCreate,
     BuildSheetOut,
     DesignRequestCreate,
     DesignRequestOut,
+    ModelCatalogOut,
     ProjectDetail,
     ProjectListItem,
     RenderOut,
@@ -90,7 +94,29 @@ async def lifespan(app: FastAPI):
         ", ".join(missing_keys) or "none",
     )
 
+    # Warm the model catalog and warn if a default model has disappeared from a vendor.
+    # Runs in the background so startup is never blocked on vendor APIs; disabled in
+    # tests via AUTOSCAPE_STARTUP_MODEL_CHECK=0.
+    check_task: asyncio.Task | None = None
+    if os.getenv("AUTOSCAPE_STARTUP_MODEL_CHECK", "1") != "0":
+        check_task = asyncio.create_task(_startup_model_check())
+
     yield
+
+    if check_task is not None and not check_task.done():
+        check_task.cancel()
+
+
+async def _startup_model_check() -> None:
+    try:
+        warnings = await model_catalog.check_defaults()
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never crash the server
+        logger.warning("[models] startup model check failed: %s: %s", exc.__class__.__name__, exc)
+        return
+    if not warnings:
+        logger.info("[models] all default models are available from their vendors")
+    for warning in warnings:
+        logger.warning("[models] %s", warning)
 
 
 app = FastAPI(title="AutoScape API", version="0.1.0", lifespan=lifespan)
@@ -119,6 +145,8 @@ def _build_sheet_out(bs: BuildSheet) -> BuildSheetOut:
         id=bs.id,
         render_id=bs.render_id,
         materials_llm=bs.materials_llm,
+        materials_model=bs.materials_model,
+        grounding_model=bs.grounding_model,
         material_items=content.get("material_items", []),
         tool_list=content.get("tool_list", []),
         build_steps=content.get("build_steps", []),
@@ -147,6 +175,7 @@ def _design_request_out(dr: DesignRequest) -> DesignRequestOut:
         project_id=dr.project_id,
         parent_render_id=dr.parent_render_id,
         image_provider=dr.image_provider,
+        image_model=dr.image_model,
         feature_categories=dr.feature_categories,
         style=dr.style,
         quality_tier=dr.quality_tier,
@@ -164,6 +193,17 @@ async def health() -> dict[str, str]:
 @app.get("/api/approved-retailers")
 def list_approved_retailers() -> list[dict[str, str]]:
     return [dict(retailer) for retailer in APPROVED_RETAILERS]
+
+
+@app.get("/api/models", response_model=ModelCatalogOut)
+async def list_models(refresh: bool = False) -> ModelCatalogOut:
+    """Models each vendor currently offers, grouped by role (image / materials / grounding).
+
+    Lists are fetched live from the vendors and cached for a few minutes; when a key is
+    missing or a vendor call fails, a static fallback list is returned with ``source``
+    set to ``fallback`` and the error message in ``error``.
+    """
+    return ModelCatalogOut(**(await model_catalog.catalog(refresh=refresh)))
 
 
 @app.post("/api/projects", status_code=201)
@@ -328,10 +368,13 @@ async def create_design_request(
 
     image_b64 = base64.b64encode(input_image_bytes).decode()
 
+    image_model = body.image_model or default_model_for(provider.value)
+
     dr = DesignRequest(
         project_id=project_id,
         parent_render_id=body.parent_render_id,
         image_provider=body.image_provider,
+        image_model=image_model,
         feature_categories=body.feature_categories,
         style=body.style,
         quality_tier=body.quality_tier,
@@ -341,7 +384,7 @@ async def create_design_request(
     db.flush()
 
     try:
-        adapter = provider.make_adapter()
+        adapter = provider.make_adapter(model=image_model)
         render_bytes_list = await adapter.generate(image_b64, body.composed_prompt)
     except MissingApiKeyError as exc:
         db.rollback()
@@ -357,10 +400,12 @@ async def create_design_request(
         detail = f"Image provider failed: {exc.__class__.__name__}: {exc}"
         status_code = _provider_error_status(exc)
         logger.warning(
-            "Image provider request failed; returning HTTP %s for project_id=%s provider=%s",
+            "Image provider request failed; returning HTTP %s for project_id=%s "
+            "provider=%s model=%s",
             status_code,
             project_id,
             body.image_provider,
+            image_model,
         )
         raise HTTPException(status_code=status_code, detail=detail)
 
@@ -390,6 +435,7 @@ async def create_design_request(
         "project_id": dr.project_id,
         "parent_render_id": dr.parent_render_id,
         "image_provider": dr.image_provider,
+        "image_model": dr.image_model,
         "feature_categories": dr.feature_categories,
         "style": dr.style,
         "quality_tier": dr.quality_tier,
@@ -534,14 +580,27 @@ async def create_build_sheet(
         raise HTTPException(status_code=404, detail="Render image file not found on disk")
     render_image_bytes = image_path.read_bytes()
 
+    materials_model = body.materials_model or default_model_for(llm.value)
+    grounding_model = body.grounding_model or default_model_for("perplexity")
+
     try:
-        grounding = SearchGrounding()
+        grounding = SearchGrounding(model=grounding_model)
         search_results = await grounding.search(feature_categories)
     except MissingApiKeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        detail = f"Search grounding failed: {exc.__class__.__name__}: {exc}"
+        status_code = _provider_error_status(exc)
+        logger.warning(
+            "Search grounding request failed; returning HTTP %s for render_id=%s model=%s",
+            status_code,
+            render_id,
+            grounding_model,
+        )
+        raise HTTPException(status_code=status_code, detail=detail)
 
     try:
-        adapter = llm.make_adapter()
+        adapter = llm.make_adapter(model=materials_model)
         content = await adapter.generate_build_sheet(
             render_image_bytes=render_image_bytes,
             dimensions=body.dimensions,
@@ -555,10 +614,12 @@ async def create_build_sheet(
         detail = f"Materials LLM failed: {exc.__class__.__name__}: {exc}"
         status_code = _provider_error_status(exc)
         logger.warning(
-            "Materials LLM request failed; returning HTTP %s for render_id=%s provider=%s",
+            "Materials LLM request failed; returning HTTP %s for render_id=%s "
+            "provider=%s model=%s",
             status_code,
             render_id,
             body.materials_llm,
+            materials_model,
         )
         raise HTTPException(status_code=status_code, detail=detail)
 
@@ -573,6 +634,8 @@ async def create_build_sheet(
     bs = BuildSheet(
         render_id=render_id,
         materials_llm=body.materials_llm,
+        materials_model=materials_model,
+        grounding_model=grounding_model,
         content_json=json.dumps(content),
     )
     db.add(bs)
