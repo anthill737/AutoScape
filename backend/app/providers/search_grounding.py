@@ -4,6 +4,9 @@ Perplexity retired the Sonar Chat Completions endpoint on 2026-09-27. The Agent 
 (``POST /v1/agent``) replaces it: the model is chosen with a ``provider/model`` id,
 web search is an explicit tool with a domain allowlist, and sources come back as a
 ``search_results`` output item plus ``url_citation`` annotations on the answer text.
+
+The Agent API is rate limited per second (1 request/s on the base tier), so category
+searches run with limited concurrency and retry on 429 / 5xx honouring ``Retry-After``.
 """
 
 from __future__ import annotations
@@ -21,8 +24,13 @@ from app.providers.model_catalog import default_model_for
 
 PERPLEXITY_AGENT_URL = "https://api.perplexity.ai/v1/agent"
 _DEFAULT_MODEL = default_model_for("perplexity")
-_MAX_OUTPUT_TOKENS = 500
+_MAX_OUTPUT_TOKENS = 1200
 _MAX_RESULTS = 10
+# Base-tier Agent API limit is 1 request/second; two in flight with retries is safe.
+_MAX_CONCURRENCY = 2
+_MAX_ATTEMPTS = 4
+_RETRY_BASE_SECONDS = 1.5
+_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
 _INSTRUCTIONS = (
     "You are a landscaping materials researcher. Answer with a concise list of specific "
@@ -44,6 +52,19 @@ class GroundingResult(TypedDict):
     snippets: list[str]
 
 
+class SearchGroundingError(Exception):
+    """Perplexity rejected the request; message carries the vendor's own explanation."""
+
+    def __init__(self, status_code: int, model: str, vendor_message: str) -> None:
+        self.status_code = status_code
+        self.model = model
+        self.vendor_message = vendor_message
+        super().__init__(
+            f"Perplexity Agent API returned HTTP {status_code} for model {model}: "
+            f"{vendor_message}"
+        )
+
+
 class SearchGrounding:
     """Issues one Agent API search per material category and parses the sources."""
 
@@ -57,23 +78,67 @@ class SearchGrounding:
                 missing_api_key_message("PERPLEXITY_API_KEY", "Search Grounding")
             )
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            tasks = [self._search_one(client, api_key, cat) for cat in categories]
-            return list(await asyncio.gather(*tasks))
+        semaphore = asyncio.Semaphore(_MAX_CONCURRENCY)
+        async with httpx.AsyncClient(timeout=90.0) as client:
+
+            async def bounded(cat: str) -> GroundingResult:
+                async with semaphore:
+                    return await self._search_one(client, api_key, cat)
+
+            return list(await asyncio.gather(*(bounded(cat) for cat in categories)))
 
     async def _search_one(
         self, client: httpx.AsyncClient, api_key: str, category: str
     ) -> GroundingResult:
-        response = await client.post(
-            PERPLEXITY_AGENT_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=build_payload(category, self.model),
-        )
-        response.raise_for_status()
-        return _parse_response(category, response.json())
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = build_payload(category, self.model)
+
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            response = await client.post(PERPLEXITY_AGENT_URL, headers=headers, json=payload)
+            if response.status_code < 400:
+                return _parse_response(category, response.json())
+
+            if response.status_code in _RETRYABLE_STATUSES and attempt < _MAX_ATTEMPTS:
+                await asyncio.sleep(_retry_delay(response, attempt))
+                continue
+
+            raise SearchGroundingError(
+                response.status_code, self.model, _vendor_message(response)
+            )
+
+        raise SearchGroundingError(599, self.model, "retries exhausted")  # pragma: no cover
+
+
+def _retry_delay(response: httpx.Response, attempt: int) -> float:
+    retry_after = response.headers.get("retry-after")
+    if retry_after:
+        try:
+            return max(0.5, float(retry_after))
+        except ValueError:
+            pass
+    return _RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+
+
+def _vendor_message(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        text = response.text.strip()
+        return text[:300] if text else response.reason_phrase or "no details"
+    error = body.get("error") if isinstance(body, dict) else None
+    if isinstance(error, dict):
+        message = error.get("message") or error.get("type") or error.get("code")
+        if message:
+            return str(message)
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if detail:
+        return str(detail)
+    return response.reason_phrase or "no details"
 
 
 def build_payload(category: str, model: str = _DEFAULT_MODEL) -> dict:

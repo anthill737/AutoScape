@@ -5,6 +5,7 @@ Live Perplexity calls are skipped when PERPLEXITY_API_KEY is absent.
 Parsing logic is tested against the documented Agent API response shape.
 """
 
+import asyncio
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,6 +16,7 @@ from app.providers.base import MissingApiKeyError
 from app.providers.search_grounding import (
     PERPLEXITY_AGENT_URL,
     SearchGrounding,
+    SearchGroundingError,
     _parse_response,
     build_payload,
 )
@@ -189,11 +191,16 @@ async def test_missing_api_key_raises(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_response(data: dict) -> MagicMock:
+def _make_mock_response(
+    data: dict, status_code: int = 200, headers: dict | None = None
+) -> MagicMock:
     """Build a mock httpx.Response that returns `data` from .json()."""
     mock_resp = MagicMock()
+    mock_resp.status_code = status_code
+    mock_resp.headers = headers or {}
+    mock_resp.reason_phrase = "Too Many Requests" if status_code == 429 else "Error"
+    mock_resp.text = ""
     mock_resp.json.return_value = data
-    mock_resp.raise_for_status = MagicMock()
     return mock_resp
 
 
@@ -272,6 +279,95 @@ async def test_search_zero_results_returns_empty_lists_not_crash(monkeypatch):
 
     assert results[0]["urls"] == []
     assert results[0]["snippets"] == []
+
+
+@pytest.mark.asyncio
+async def test_search_retries_on_429_honoring_retry_after(monkeypatch):
+    monkeypatch.setenv("PERPLEXITY_API_KEY", "test-key")
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("app.providers.search_grounding.asyncio.sleep", fake_sleep)
+    rate_limited = _make_mock_response(
+        {"error": {"type": "rate_limit", "message": "slow down"}},
+        status_code=429,
+        headers={"retry-after": "2"},
+    )
+    mock_post = AsyncMock(side_effect=[rate_limited, _make_mock_response(_SAMPLE_RESPONSE)])
+    ctx = _patched_client(mock_post)
+    try:
+        results = await SearchGrounding().search(["deck"])
+    finally:
+        ctx.stop()
+
+    assert results[0]["urls"]
+    assert mock_post.call_count == 2
+    assert sleeps == [2.0]
+
+
+@pytest.mark.asyncio
+async def test_search_raises_vendor_message_after_retries_exhausted(monkeypatch):
+    monkeypatch.setenv("PERPLEXITY_API_KEY", "test-key")
+    monkeypatch.setattr("app.providers.search_grounding.asyncio.sleep", AsyncMock())
+    rate_limited = _make_mock_response(
+        {"error": {"type": "rate_limit", "message": "Rate limit exceeded for tier 0"}},
+        status_code=429,
+    )
+    mock_post = AsyncMock(return_value=rate_limited)
+    ctx = _patched_client(mock_post)
+    try:
+        with pytest.raises(SearchGroundingError) as exc_info:
+            await SearchGrounding(model="perplexity/sonar").search(["deck"])
+    finally:
+        ctx.stop()
+
+    assert exc_info.value.status_code == 429
+    assert "HTTP 429" in str(exc_info.value)
+    assert "Rate limit exceeded for tier 0" in str(exc_info.value)
+    assert "perplexity/sonar" in str(exc_info.value)
+    assert mock_post.call_count == 4
+
+
+@pytest.mark.asyncio
+async def test_search_does_not_retry_auth_errors(monkeypatch):
+    monkeypatch.setenv("PERPLEXITY_API_KEY", "bad-key")
+    unauthorized = _make_mock_response(
+        {"error": "Invalid API key or out of credits"}, status_code=401
+    )
+    mock_post = AsyncMock(return_value=unauthorized)
+    ctx = _patched_client(mock_post)
+    try:
+        with pytest.raises(SearchGroundingError, match="Invalid API key or out of credits"):
+            await SearchGrounding().search(["deck"])
+    finally:
+        ctx.stop()
+    assert mock_post.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_search_limits_concurrency(monkeypatch):
+    monkeypatch.setenv("PERPLEXITY_API_KEY", "test-key")
+    in_flight = 0
+    peak = 0
+
+    async def fake_post(url, **kwargs):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0)
+        in_flight -= 1
+        return _make_mock_response(_SAMPLE_RESPONSE)
+
+    ctx = _patched_client(AsyncMock(side_effect=fake_post))
+    try:
+        results = await SearchGrounding().search(["Deck", "Fire Feature", "Pool", "Patio"])
+    finally:
+        ctx.stop()
+
+    assert len(results) == 4
+    assert peak <= 2
 
 
 # ---------------------------------------------------------------------------

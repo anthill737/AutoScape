@@ -27,7 +27,7 @@ from app.providers.image_provider import ImageProvider
 from app.providers.materials_llm import MaterialsLLM
 from app.providers.model_catalog import catalog as model_catalog
 from app.providers.model_catalog import default_model_for
-from app.providers.search_grounding import SearchGrounding
+from app.providers.search_grounding import SearchGrounding, SearchGroundingError
 from app.schemas import (
     BuildSheetCreate,
     BuildSheetOut,
@@ -58,6 +58,16 @@ def _database_location_for_log() -> str:
     if DATABASE_URL.startswith("sqlite:///"):
         return str(Path(DATABASE_URL.removeprefix("sqlite:///")).resolve())
     return DATABASE_URL
+
+
+def _grounding_http_status(vendor_status: int) -> int:
+    if vendor_status == 429:
+        return 429
+    if vendor_status in {401, 402, 403}:
+        return 401
+    if vendor_status >= 500:
+        return 503
+    return 502
 
 
 def _provider_error_status(exc: Exception) -> int:
@@ -588,14 +598,27 @@ async def create_build_sheet(
         search_results = await grounding.search(feature_categories)
     except MissingApiKeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except SearchGroundingError as exc:
+        # Pass the vendor's status and explanation straight through so the UI can say
+        # "rate limited" or "out of credits" instead of an opaque failure.
+        status_code = _grounding_http_status(exc.status_code)
+        logger.warning(
+            "Search grounding rejected; returning HTTP %s for render_id=%s model=%s: %s",
+            status_code,
+            render_id,
+            grounding_model,
+            exc,
+        )
+        raise HTTPException(status_code=status_code, detail=f"Product research failed: {exc}")
     except Exception as exc:
         detail = f"Search grounding failed: {exc.__class__.__name__}: {exc}"
         status_code = _provider_error_status(exc)
         logger.warning(
-            "Search grounding request failed; returning HTTP %s for render_id=%s model=%s",
+            "Search grounding request failed; returning HTTP %s for render_id=%s model=%s: %s",
             status_code,
             render_id,
             grounding_model,
+            detail,
         )
         raise HTTPException(status_code=status_code, detail=detail)
 

@@ -366,6 +366,25 @@ class TestCreateBuildSheet:
         assert resp.json()["materials_model"] == default_model_for("claude_sonnet")
         assert resp.json()["grounding_model"] == default_model_for("perplexity")
 
+    def test_grounding_rate_limit_surfaces_vendor_message_as_429(self, setup, monkeypatch):
+        from app.providers.search_grounding import SearchGroundingError
+
+        c, render_id = setup
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("PERPLEXITY_API_KEY", "px-test")
+        with patch(
+            "app.main.SearchGrounding.search",
+            new=AsyncMock(
+                side_effect=SearchGroundingError(429, "perplexity/sonar", "Rate limit exceeded")
+            ),
+        ):
+            resp = c.post(f"/api/renders/{render_id}/build-sheet", json=_VALID_POST_BODY)
+
+        assert resp.status_code == 429
+        detail = resp.json()["detail"]
+        assert detail.startswith("Product research failed: Perplexity Agent API returned HTTP 429")
+        assert "Rate limit exceeded" in detail
+
     def test_grounding_failure_returns_structured_error(self, setup, monkeypatch):
         c, render_id = setup
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
