@@ -19,3 +19,4 @@ ${APPDATA}/
 autoscape-trace*.txt
 frontend/tests.err
 frontend/tests.out
+.runtime/

@@ -57,12 +57,17 @@ describe("readBackendPort (vite.config proxy-port resolution)", () => {
     expect(configSource).toContain('"/images"');
     expect(configSource).toContain('"/thumbnails"');
     expect(configSource).toContain('"/renders"');
+    // Every proxied prefix uses the shared entry builder, whose router()
+    // re-reads .runtime-port per request so the target follows the backend.
+    for (const prefix of ["/api", "/images", "/thumbnails", "/renders"]) {
+      expect(configSource).toMatch(
+        new RegExp(`"${prefix.replace("/", "\\/")}"\\s*:\\s*makeProxyEntry\\(\\)`),
+      );
+    }
     expect(configSource).toMatch(
-      /"\/thumbnails"\s*:\s*\{\s*target:\s*`http:\/\/127\.0\.0\.1:\$\{backendPort\}`,\s*changeOrigin:\s*true,\s*\}/s,
+      /router:\s*\(\)\s*=>\s*`http:\/\/127\.0\.0\.1:\$\{readBackendPort\(\)\}`/,
     );
-    expect(configSource).toMatch(
-      /"\/renders"\s*:\s*\{\s*target:\s*`http:\/\/127\.0\.0\.1:\$\{backendPort\}`,\s*changeOrigin:\s*true,\s*\}/s,
-    );
+    expect(configSource).toMatch(/changeOrigin:\s*true/);
     expect(configSource).toMatch(/server:\s*\{[^}]*proxy:\s*backendProxy/s);
     expect(configSource).toMatch(/preview:\s*\{[^}]*proxy:\s*backendProxy/s);
   });

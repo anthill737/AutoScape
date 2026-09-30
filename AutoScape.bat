@@ -104,20 +104,34 @@ if exist "secrets" (
     echo  [setup] secrets\ not found; backend will rely on environment variables or optional backend\.env.local.
 )
 
-:: ---- Derive short-form (8.3) path for TEMP to avoid space issues in log paths ----
-for %%I in ("%TEMP%") do set "TDIR=%%~sI"
+:: ---- Log file locations ----
+:: Use the FULL %TEMP% path. (A previous version converted this to an 8.3 short
+:: path via %%~sI, but on volumes where 8.3 name generation is disabled that
+:: short name does not resolve, so the log files could not be created and the
+:: tailer printed "The system cannot find the file ..." on every loop.) We quote
+:: the paths everywhere so spaces are handled even if %TEMP% ever contains them.
+:: Store logs inside the project under a RELATIVE path. We cd'd to the project
+:: root at the top of this script, so ".runtime" always exists/writable here and a
+:: relative path can never contain spaces -- even though the absolute project path
+:: does. This avoids every prior failure mode: %TEMP% resolving to a non-resolvable
+:: 8.3 short path, needing admin to write to C:\, and nested-quote redirect breakage.
+:: The child processes (started with "cd /d backend"/"cd /d frontend") reach these
+:: via "..\.runtime\..."; the reader (run from project root) uses ".runtime\...".
+set "LOGDIR=.runtime"
+if not exist "%LOGDIR%" mkdir "%LOGDIR%"
+set "BLOG=%LOGDIR%\ascape_back.log"
+set "FLOG=%LOGDIR%\ascape_front.log"
 
-:: Log files land in %TEMP% so they don't clutter the project root.
-set "BLOG=%TDIR%\ascape_back.log"
-set "FLOG=%TDIR%\ascape_front.log"
+:: Path the CHILD shells use after they cd into backend\ / frontend\ (one level deep).
+set "BLOG_CHILD=..\%LOGDIR%\ascape_back.log"
+set "FLOG_CHILD=..\%LOGDIR%\ascape_front.log"
 
-:: Pre-create log files before starting child processes so the log tailer never
-:: encounters a missing file during the startup window.
+:: Pre-create the log files so they exist before the child processes start.
 type nul > "%BLOG%"
 type nul > "%FLOG%"
 
 :: ---- Port probe: find first free port in 8000-8010 ----
-:: Write a temporary Python script to %TEMP% and run it to probe TCP ports.
+:: Write a temporary Python script into .runtime and run it to probe TCP ports.
 (
 echo import socket
 echo import sys
@@ -130,11 +144,11 @@ echo         print^(port^)
 echo         sys.exit^(0^)
 echo     except OSError:
 echo         pass
-) > "%TDIR%\ascape_probe.py"
+) > "%LOGDIR%\ascape_probe.py"
 
 set "CHOSEN_PORT="
-for /f %%P in ('python "%TDIR%\ascape_probe.py"') do set "CHOSEN_PORT=%%P"
-del "%TDIR%\ascape_probe.py" 2>nul
+for /f %%P in ('python "%LOGDIR%\ascape_probe.py"') do set "CHOSEN_PORT=%%P"
+del "%LOGDIR%\ascape_probe.py" 2>nul
 
 if not defined CHOSEN_PORT (
     echo.
@@ -198,19 +212,25 @@ if not exist "frontend\node_modules\vite" (
 :: terminated when this console window is closed (Windows kills the whole group).
 :: Use relative "cd /d backend" -- the new cmd.exe inherits our project-root cwd.
 echo  [AutoScape] Backend on http://localhost:!CHOSEN_PORT!
-start /b "" cmd /c "cd /d backend && !UV_CMD! run uvicorn app.main:app --reload --port !CHOSEN_PORT! >> %BLOG% 2>&1"
+start /b "" cmd /c "cd /d backend && !UV_CMD! run uvicorn app.main:app --reload --port !CHOSEN_PORT! >> !BLOG_CHILD! 2>&1"
 
 :: ---- Start frontend ----
 echo  [AutoScape] Starting frontend on port 5173...
-start /b "" cmd /c "cd /d frontend && !PNPM_CMD! --config.verify-deps-before-run=false dev >> %FLOG% 2>&1"
+start /b "" cmd /c "cd /d frontend && !PNPM_CMD! --config.verify-deps-before-run=false dev >> !FLOG_CHILD! 2>&1"
 
 echo.
-echo  Waiting for frontend to be ready at http://localhost:5173
+echo  Waiting for the backend and frontend to be ready...
 echo  Log output from both services appears below.
 echo  ^(Close this window at any time to stop backend and frontend.^)
 echo.
 
-:: ---- Poll until frontend responds, streaming logs meanwhile (max ~2 min) ----
+:: ---- Poll until BOTH services respond, streaming logs meanwhile (max ~3 min) ----
+:: We wait for the backend /health endpoint first. The backend only begins
+:: accepting connections after its startup work (DB migrations, etc.) completes,
+:: so a successful response means the API is genuinely ready to serve requests.
+:: Only once the backend is healthy AND the frontend responds do we open the
+:: browser -- this is what prevents the page from loading before the API is up
+:: and hitting transient 500s on the first /api/projects call.
 set /a BEND=0
 set /a FEND=0
 set /a WAIT=0
@@ -219,17 +239,24 @@ set /a WAIT=0
 ping -n 2 127.0.0.1 > nul
 call :show_new_logs
 set /a WAIT+=1
-if !WAIT! GTR 60 goto timeout_error
-curl -s --connect-timeout 1 http://localhost:5173 > nul 2>&1
-if !errorlevel! equ 0 goto frontend_ready
+if !WAIT! GTR 90 goto timeout_error
+
+:: 1) Backend ready? (curl exits 0 once the server accepts the connection.)
+curl -s --connect-timeout 1 --max-time 3 http://localhost:!CHOSEN_PORT!/health > nul 2>&1
+if !errorlevel! neq 0 goto wait_loop
+
+:: 2) Frontend ready?
+curl -s --connect-timeout 1 --max-time 3 http://localhost:5173 > nul 2>&1
+if !errorlevel! equ 0 goto services_ready
 goto wait_loop
 
 :timeout_error
 echo.
-echo  ERROR: Frontend did not respond within ~2 minutes.
-echo  Review the [frontend] log lines above for details.
+echo  ERROR: Services did not become ready within ~3 minutes.
+echo  Review the [backend] and [frontend] log lines above for details.
 echo  Common causes:
 echo    - Port 5173 is already in use by another application
+echo    - The backend failed to start ^(check the [backend] lines above^)
 echo    - pnpm is not installed         ^(fix: npm install -g pnpm^)
 echo    - Frontend dependencies missing  ^(fix: cd frontend ^&^& pnpm install^)
 echo.
@@ -237,7 +264,7 @@ echo  Press any key to close this window.
 pause > nul
 exit /b 1
 
-:frontend_ready
+:services_ready
 start "" "http://localhost:5173"
 echo.
 echo  ==========================================
@@ -254,15 +281,18 @@ goto log_loop
 
 :: ---- Subroutine: print any new lines from each log with a service prefix ----
 :show_new_logs
+if not exist "!BLOG!" goto :show_front
 set /a BLINE=0
-for /f "usebackq tokens=* delims= eol=^" %%A in ("%BLOG%") do (
+for /f "usebackq tokens=* delims= eol=^" %%A in ("!BLOG!") do (
     set /a BLINE+=1
     if !BLINE! GTR !BEND! echo [backend] %%A
 )
 if !BLINE! GTR !BEND! set BEND=!BLINE!
 
+:show_front
+if not exist "!FLOG!" exit /b 0
 set /a FLINE=0
-for /f "usebackq tokens=* delims= eol=^" %%A in ("%FLOG%") do (
+for /f "usebackq tokens=* delims= eol=^" %%A in ("!FLOG!") do (
     set /a FLINE+=1
     if !FLINE! GTR !FEND! echo [frontend] %%A
 )
