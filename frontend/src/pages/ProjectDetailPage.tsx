@@ -1080,29 +1080,29 @@ const HeroSection = forwardRef<HTMLElement, HeroSectionProps>(function HeroSecti
               )}
             </div>
           </div>
-
-          <ProjectDimensionsPanel
-            dr={context.dr}
-            chosenRenderId={context.render.id}
-            dimensionStatus={dimensionStatus}
-            onRetryDimensions={onRetryDimensions}
-            dimensionValues={dimensionValues}
-            materialsLlm={materialsLlm}
-            materialsModel={materialsModel}
-            groundingModel={groundingModel}
-            modelCatalog={modelCatalog}
-            modelsLoading={modelsLoading}
-            generating={generating}
-            error={error}
-            buildSheet={buildSheet}
-            onDimensionChange={onDimensionChange}
-            onLlmChange={onLlmChange}
-            onMaterialsModelChange={onMaterialsModelChange}
-            onGroundingModelChange={onGroundingModelChange}
-            onGenerate={onGenerateBuildSheet}
-          />
         </aside>
       </div>
+
+      <ProjectDimensionsPanel
+        dr={context.dr}
+        chosenRenderId={context.render.id}
+        dimensionStatus={dimensionStatus}
+        onRetryDimensions={onRetryDimensions}
+        dimensionValues={dimensionValues}
+        materialsLlm={materialsLlm}
+        materialsModel={materialsModel}
+        groundingModel={groundingModel}
+        modelCatalog={modelCatalog}
+        modelsLoading={modelsLoading}
+        generating={generating}
+        error={error}
+        buildSheet={buildSheet}
+        onDimensionChange={onDimensionChange}
+        onLlmChange={onLlmChange}
+        onMaterialsModelChange={onMaterialsModelChange}
+        onGroundingModelChange={onGroundingModelChange}
+        onGenerate={onGenerateBuildSheet}
+      />
 
       {buildSheet && (
         <div
@@ -1571,12 +1571,11 @@ function ProjectDimensionsPanel({
   const materialsProviderEntry = findProvider(modelCatalog, materialsLlm);
   const groundingProviderEntry = modelCatalog.grounding[0];
   const fields = getDimensionFieldsForCategories(dr.feature_categories);
-  const allFilled =
-    fields.length === 0 ||
-    fields.every((f) => (dimensionValues[f.key] ?? "").trim() !== "");
+  const missing = fields.filter((f) => (dimensionValues[f.key] ?? "").trim() === "");
+  const allFilled = missing.length === 0;
 
-  // When a build sheet exists it is rendered full-width below the hero grid
-  // (see HeroSection), not inside this narrow rail.
+  // Once a build sheet exists it is rendered below (see HeroSection); this setup panel
+  // is replaced by it.
   if (buildSheet) {
     return null;
   }
@@ -1584,101 +1583,158 @@ function ProjectDimensionsPanel({
   return (
     <section
       id={`dimensions-render-${chosenRenderId}`}
-      className="mt-6 border-t border-default pt-6 space-y-4"
+      aria-label="Build sheet setup"
+      className="mt-8 rounded-lg border border-default bg-surface-elevated p-5 shadow-sm sm:p-6"
       tabIndex={-1}
     >
-      <h3 className="text-lg font-semibold text-foreground">Project Dimensions</h3>
-
-      {fields.length > 0 && dimensionStatus?.state === "loading" && (
-        <p role="status" className="text-xs text-muted">
-          <span className="animate-pulse">Auto-filling dimensions from the render…</span>
-        </p>
-      )}
-      {fields.length > 0 && dimensionStatus?.state === "done" && (
-        <p className="text-xs text-muted">
-          Auto-filled from the render; adjust anything that looks off.
-        </p>
-      )}
-      {fields.length > 0 && dimensionStatus?.state === "error" && (
-        <div role="alert" className="rounded border border-danger bg-surface px-3 py-2 text-xs">
-          <p className="text-danger">Couldn't auto-fill dimensions: {dimensionStatus.message}</p>
-          <button
-            type="button"
-            onClick={onRetryDimensions}
-            className="mt-1 font-medium text-accent hover:underline"
-          >
-            Try again
-          </button>
-          <span className="text-muted"> or type them in below.</span>
+      <div className="mb-5 flex flex-wrap items-baseline justify-between gap-3">
+        <div>
+          <h3 className="text-lg font-semibold text-foreground">Build Sheet for this render</h3>
+          <p className="mt-1 text-sm text-muted">
+            Confirm the dimensions, pick the models, then generate a materials list, tool list,
+            build steps, and cost range.
+          </p>
         </div>
-      )}
+      </div>
 
-      {fields.length > 0 && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {fields.map((field) => (
-            <div key={field.key}>
-              <label className="block text-sm font-medium text-foreground mb-1">
-                {field.label}
-              </label>
-              <input
-                type="number"
-                min="0"
-                step="0.5"
-                aria-label={field.label}
-                value={dimensionValues[field.key] ?? ""}
-                onChange={(e) => onDimensionChange(field.key, e.target.value)}
-                className="w-full rounded border border-default bg-surface-elevated px-3 py-2 text-foreground focus:outline-none focus:ring-2 focus:ring-accent"
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        {/* Dimensions */}
+        <div className="min-w-0">
+          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">
+              Project Dimensions
+            </h4>
+            {fields.length > 0 && dimensionStatus?.state === "loading" && (
+              <p role="status" className="text-xs text-muted">
+                <span className="animate-pulse">Auto-filling dimensions from the render…</span>
+              </p>
+            )}
+            {fields.length > 0 && dimensionStatus?.state === "done" && (
+              <p className="text-xs text-muted">
+                Auto-filled from the render; adjust anything that looks off.
+              </p>
+            )}
+          </div>
+
+          {fields.length > 0 && dimensionStatus?.state === "error" && (
+            <div role="alert" className="mb-3 rounded border border-danger bg-surface px-3 py-2 text-xs">
+              <p className="text-danger">Couldn't auto-fill dimensions: {dimensionStatus.message}</p>
+              <button
+                type="button"
+                onClick={onRetryDimensions}
+                className="mt-1 font-medium text-accent hover:underline"
+              >
+                Try again
+              </button>
+              <span className="text-muted"> or type them in below.</span>
+            </div>
+          )}
+
+          {fields.length > 0 ? (
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+              {fields.map((field) => (
+                <div key={field.key}>
+                  <label
+                    htmlFor={`dim-${chosenRenderId}-${field.key}`}
+                    className="mb-1 block text-xs font-medium text-foreground"
+                  >
+                    {field.label}
+                  </label>
+                  <input
+                    id={`dim-${chosenRenderId}-${field.key}`}
+                    type="number"
+                    min="0"
+                    step="0.5"
+                    aria-label={field.label}
+                    value={dimensionValues[field.key] ?? ""}
+                    onChange={(e) => onDimensionChange(field.key, e.target.value)}
+                    className="w-full rounded border border-default bg-surface px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-accent"
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-muted">
+              No measurements needed for {formatFeatureCategories(dr.feature_categories)}.
+            </p>
+          )}
+        </div>
+
+        {/* Models */}
+        <div className="min-w-0 space-y-5">
+          <fieldset>
+            <legend className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
+              Materials LLM
+            </legend>
+            <div className="flex flex-wrap gap-2">
+              {MATERIALS_LLMS.map((opt) => {
+                const on = materialsLlm === opt.value;
+                return (
+                  <label
+                    key={opt.value}
+                    className={`flex cursor-pointer select-none items-center gap-2 rounded-full border px-3 py-1.5 text-sm transition ${
+                      on
+                        ? "border-accent bg-surface text-foreground"
+                        : "border-default bg-surface-elevated text-foreground hover:border-accent"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name={`materialsLlm-${chosenRenderId}`}
+                      value={opt.value}
+                      checked={on}
+                      onChange={() => onLlmChange(opt.value)}
+                      className="h-3.5 w-3.5"
+                    />
+                    {opt.label}
+                  </label>
+                );
+              })}
+            </div>
+            <div className="mt-3">
+              <ModelPicker
+                label="Materials model"
+                provider={materialsProviderEntry}
+                value={materialsModel}
+                loading={modelsLoading}
+                onChange={onMaterialsModelChange}
               />
             </div>
-          ))}
-        </div>
-      )}
+          </fieldset>
 
-      <fieldset>
-        <legend className="font-medium text-foreground mb-2">Materials LLM</legend>
-        <div className="flex gap-4 flex-wrap">
-          {MATERIALS_LLMS.map((opt) => (
-            <label key={opt.value} className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="radio"
-                name={`materialsLlm-${chosenRenderId}`}
-                value={opt.value}
-                checked={materialsLlm === opt.value}
-                onChange={() => onLlmChange(opt.value)}
-              />
-              {opt.label}
-            </label>
-          ))}
+          <div>
+            <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
+              Product research
+            </h4>
+            <ModelPicker
+              label="Product research model"
+              provider={groundingProviderEntry}
+              value={groundingModel}
+              loading={modelsLoading}
+              onChange={onGroundingModelChange}
+            />
+          </div>
         </div>
-        <div className="mt-3 space-y-4">
-          <ModelPicker
-            label="Materials model"
-            provider={materialsProviderEntry}
-            value={materialsModel}
-            loading={modelsLoading}
-            compact
-            onChange={onMaterialsModelChange}
-          />
-          <ModelPicker
-            label="Product research model"
-            provider={groundingProviderEntry}
-            value={groundingModel}
-            loading={modelsLoading}
-            compact
-            onChange={onGroundingModelChange}
-          />
-        </div>
-      </fieldset>
+      </div>
 
-      {error && <p className="text-danger text-sm">{error}</p>}
+      {error && <p className="mt-5 text-sm text-danger">{error}</p>}
 
-      <button
-        disabled={!allFilled || generating}
-        onClick={onGenerate}
-        className="bg-accent text-accent-foreground px-5 py-2 rounded hover:opacity-90 disabled:opacity-50"
-      >
-        {generating ? "Generating Build Sheet…" : "Generate Build Sheet"}
-      </button>
+      <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-default pt-5">
+        <button
+          disabled={!allFilled || generating}
+          onClick={onGenerate}
+          className="rounded bg-accent px-5 py-2.5 text-sm font-semibold text-accent-foreground hover:opacity-90 disabled:opacity-50"
+        >
+          {generating ? "Generating Build Sheet…" : "Generate Build Sheet"}
+        </button>
+        <span className="text-xs text-muted">
+          {generating
+            ? "Researching products and pricing the materials. This takes about a minute."
+            : allFilled
+              ? "Runs product research, then prices every material for this design."
+              : `Fill in ${missing.length} more dimension${missing.length === 1 ? "" : "s"} to enable.`}
+        </span>
+      </div>
     </section>
   );
 }
