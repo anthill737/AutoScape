@@ -164,7 +164,11 @@ The launcher will:
 
 **First run note:** On a machine that has never run AutoScape before, `AutoScape.bat` will print `[setup] uv not found — installing via pip...` (and similarly for `pnpm`) before the normal startup output. This is expected — subsequent launches skip the install step.
 
-**To stop:** close the `AutoScape Launcher` console window. Both backend and frontend processes terminate automatically.
+**To stop:** double-click **`Stop-AutoScape.bat`** (or run it from a prompt). It kills the
+backend, the frontend, their wrapper shells, and any launcher console windows, including
+processes orphaned by an earlier crash. Closing the `AutoScape Launcher` window also stops the
+services in the normal case. `Stop-AutoScape.bat /dry` lists what would be stopped without
+stopping anything.
 
 ---
 

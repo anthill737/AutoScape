@@ -3,6 +3,8 @@ setlocal enabledelayedexpansion
 
 :: Work from the directory containing this script so relative paths always resolve.
 cd /d "%~dp0"
+:: Window title lets Stop-AutoScape.bat find and close this console.
+title AutoScape Launcher
 
 echo.
 echo  ==========================================
