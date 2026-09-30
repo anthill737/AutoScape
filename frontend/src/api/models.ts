@@ -48,7 +48,29 @@ export async function fetchModelCatalog(refresh = false): Promise<ModelCatalog> 
   if (!res.ok) {
     throw new Error(await parseApiError(res, `Failed to load models: ${res.status}`));
   }
-  return res.json() as Promise<ModelCatalog>;
+  return normalizeCatalog((await res.json()) as ModelCatalog);
+}
+
+/** Fill in comparison fields an older backend might omit so the UI never shows "OLDER"
+ *  or "n/a" just because a field is missing. */
+export function normalizeCatalog(catalog: ModelCatalog): ModelCatalog {
+  const fix = (providers: ProviderModels[] | undefined) =>
+    (providers ?? []).map((p) => ({
+      ...p,
+      models: (p.models ?? []).map(
+        (m): ModelInfo => ({
+          tier: "unknown",
+          quality: null,
+          cost: null,
+          cost_rank: null,
+          recommended: false,
+          note: null,
+          current: true,
+          ...(m as Partial<ModelInfo> & Pick<ModelInfo, "id" | "display_name">),
+        }),
+      ),
+    }));
+  return { image: fix(catalog.image), materials: fix(catalog.materials), grounding: fix(catalog.grounding) };
 }
 
 /** Find a provider entry by slug in any role. */

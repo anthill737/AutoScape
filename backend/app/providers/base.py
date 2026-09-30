@@ -63,3 +63,13 @@ class MaterialsAdapter(ABC):
         Raises:
             MissingApiKeyError: If the required API key env var is not set.
         """
+
+    async def suggest_dimension_defaults(
+        self,
+        render_image_bytes: bytes,
+        feature_categories: list[str],
+        lot_size_sqft: float | None,
+        house_sqft: float | None,
+    ) -> dict[str, str]:
+        """Suggest starting dimensions ({field_key: numeric string}) from a render image."""
+        raise NotImplementedError(f"{self.__class__.__name__} cannot suggest dimensions")

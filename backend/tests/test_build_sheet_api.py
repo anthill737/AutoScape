@@ -208,6 +208,37 @@ def sparse_setup(tmp_path):
 
 # ---------------------------------------------------------------------------
 # GET/POST /api/renders/{id}/dimension-defaults
+
+class TestDimensionDefaultsProviderChoice:
+    def test_body_provider_and_model_are_forwarded(self, setup):
+        c, render_id = setup
+        with patch(
+            "app.main.suggest_dimension_defaults",
+            new=AsyncMock(return_value=_MOCK_DIMENSION_DEFAULTS),
+        ) as mock_suggest:
+            resp = c.post(
+                f"/api/renders/{render_id}/dimension-defaults",
+                json={"materials_llm": "gpt5", "materials_model": " gpt-6-luna "},
+            )
+
+        assert resp.status_code == 200
+        kwargs = mock_suggest.await_args.kwargs
+        assert kwargs["materials_llm"] == "gpt5"
+        assert kwargs["model"] == "gpt-6-luna"
+
+    def test_vendor_failure_returns_structured_detail(self, setup):
+        c, render_id = setup
+        with patch(
+            "app.main.suggest_dimension_defaults",
+            new=AsyncMock(side_effect=RuntimeError("model gpt-9 does not exist")),
+        ):
+            resp = c.post(f"/api/renders/{render_id}/dimension-defaults", json={})
+
+        assert resp.status_code == 500
+        assert resp.json()["detail"].startswith("Dimension suggestions failed: RuntimeError")
+        assert "gpt-9" in resp.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 
 

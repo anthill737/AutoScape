@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { getProject, ProjectDetail } from "../api/projects";
 import { ApiError } from "../api/errors";
@@ -294,6 +294,13 @@ export default function ProjectDetailPage() {
   const [buildSheetErrors, setBuildSheetErrors] = useState<Record<number, string>>({});
   const [buildSheets, setBuildSheets] = useState<Record<number, BuildSheetOut>>({});
   const fetchedDefaultsRef = useRef<Set<number>>(new Set());
+  // Per-render status of the auto-fill call so the panel can say what happened.
+  const [dimensionStatus, setDimensionStatus] = useState<
+    Record<number, { state: "loading" } | { state: "error"; message: string } | { state: "done" }>
+  >({});
+  // Design Request whose renders were just generated in this session (drives the banner).
+  const [justGeneratedRequestId, setJustGeneratedRequestId] = useState<number | null>(null);
+  const heroRef = useRef<HTMLElement | null>(null);
   const fetchedBuildSheetsRef = useRef<Set<number>>(new Set());
   const designRequestFormRef = useRef<HTMLFormElement | null>(null);
   const pendingFormFocusRef = useRef(false);
@@ -340,25 +347,44 @@ export default function ProjectDetailPage() {
     }
   }, [activeRenderId, id, location.pathname, navigate, project, renderId]);
 
+  function loadDimensionDefaults(targetRenderId: number, force = false) {
+    if (!force && fetchedDefaultsRef.current.has(targetRenderId)) return;
+    fetchedDefaultsRef.current.add(targetRenderId);
+    const llm = materialsLlmFor(targetRenderId);
+    setDimensionStatus((prev) => ({ ...prev, [targetRenderId]: { state: "loading" } }));
+    getDimensionDefaults(targetRenderId, {
+      materialsLlm: llm,
+      materialsModel: materialsModelFor(llm) || null,
+    })
+      .then((defaults) => {
+        setDimensionValues((prev) => ({
+          ...prev,
+          [targetRenderId]: {
+            ...Object.fromEntries(Object.entries(defaults).map(([k, v]) => [k, String(v)])),
+            // Never overwrite something the user already typed.
+            ...Object.fromEntries(
+              Object.entries(prev[targetRenderId] ?? {}).filter(([, v]) => v.trim() !== ""),
+            ),
+          },
+        }));
+        setDimensionStatus((prev) => ({ ...prev, [targetRenderId]: { state: "done" } }));
+      })
+      .catch((e: unknown) => {
+        setDimensionStatus((prev) => ({
+          ...prev,
+          [targetRenderId]: {
+            state: "error",
+            message: e instanceof Error ? e.message : "Unknown error",
+          },
+        }));
+      });
+  }
+
   useEffect(() => {
     if (!project || activeRenderId == null || !findRender(project, activeRenderId)) {
       return;
     }
-    if (!fetchedDefaultsRef.current.has(activeRenderId)) {
-      fetchedDefaultsRef.current.add(activeRenderId);
-      getDimensionDefaults(activeRenderId)
-        .then((defaults) => {
-          setDimensionValues((prev) => ({
-            ...prev,
-            [activeRenderId]: Object.fromEntries(
-              Object.entries(defaults).map(([k, v]) => [k, String(v)]),
-            ),
-          }));
-        })
-        .catch(() => {
-          // Leave fields empty; user can fill manually
-        });
-    }
+    loadDimensionDefaults(activeRenderId);
 
     if (!fetchedBuildSheetsRef.current.has(activeRenderId)) {
       fetchedBuildSheetsRef.current.add(activeRenderId);
@@ -378,21 +404,7 @@ export default function ProjectDetailPage() {
     if (!project) return;
     for (const dr of project.design_requests) {
       const chosen = dr.renders.find((r) => r.is_chosen);
-      if (chosen && !fetchedDefaultsRef.current.has(chosen.id)) {
-        fetchedDefaultsRef.current.add(chosen.id);
-        getDimensionDefaults(chosen.id)
-          .then((defaults) => {
-            setDimensionValues((prev) => ({
-              ...prev,
-              [chosen.id]: Object.fromEntries(
-                Object.entries(defaults).map(([k, v]) => [k, String(v)]),
-              ),
-            }));
-          })
-          .catch(() => {
-            // Leave fields empty; user can fill manually
-          });
-      }
+      if (chosen) loadDimensionDefaults(chosen.id);
     }
   }, [project]);
 
@@ -519,7 +531,14 @@ export default function ProjectDetailPage() {
       setProject((prev) =>
         prev ? { ...prev, design_requests: [...prev.design_requests, dr] } : prev,
       );
+      setJustGeneratedRequestId(dr.id);
       closeForm();
+      window.setTimeout(() => {
+        const hero = heroRef.current;
+        if (hero && typeof hero.scrollIntoView === "function") {
+          hero.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      }, 0);
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : "Unknown error";
       if (e instanceof ApiError && e.status === 429) {
@@ -687,7 +706,13 @@ export default function ProjectDetailPage() {
 
             {activeContext && (
               <HeroSection
+                ref={heroRef}
                 context={activeContext}
+                isNewRequest={justGeneratedRequestId === activeContext.dr.id}
+                onDismissNew={() => setJustGeneratedRequestId(null)}
+                onActivateRender={activateRender}
+                dimensionStatus={dimensionStatus[activeContext.render.id] ?? null}
+                onRetryDimensions={() => loadDimensionDefaults(activeContext.render.id, true)}
                 buildSheet={buildSheets[activeContext.render.id] ?? null}
                 dimensionValues={dimensionValues[activeContext.render.id] ?? {}}
                 materialsLlm={materialsLlmFor(activeContext.render.id)}
@@ -767,8 +792,19 @@ export default function ProjectDetailPage() {
   );
 }
 
+type DimensionStatus =
+  | { state: "loading" }
+  | { state: "error"; message: string }
+  | { state: "done" }
+  | null;
+
 interface HeroSectionProps {
   context: ActiveRenderContext;
+  isNewRequest: boolean;
+  onDismissNew: () => void;
+  onActivateRender: (renderId: number) => void;
+  dimensionStatus: DimensionStatus;
+  onRetryDimensions: () => void;
   buildSheet: BuildSheetOut | null;
   dimensionValues: Record<string, string>;
   materialsLlm: string;
@@ -788,8 +824,14 @@ interface HeroSectionProps {
   onRegenerate: () => void;
 }
 
-function HeroSection({
+const HeroSection = forwardRef<HTMLElement, HeroSectionProps>(function HeroSection(
+  {
   context,
+  isNewRequest,
+  onDismissNew,
+  onActivateRender,
+  dimensionStatus,
+  onRetryDimensions,
   buildSheet,
   dimensionValues,
   materialsLlm,
@@ -807,8 +849,11 @@ function HeroSection({
   onGroundingModelChange,
   onGenerateBuildSheet,
   onRegenerate,
-}: HeroSectionProps) {
+  },
+  ref,
+) {
   const [imageLoaded, setImageLoaded] = useState(false);
+  const imgRef = useRef<HTMLImageElement | null>(null);
   const [imageFailed, setImageFailed] = useState(false);
   const [retryNonce, setRetryNonce] = useState(0);
   const retryCountRef = useRef(0);
@@ -827,6 +872,11 @@ function HeroSection({
     setImageFailed(false);
     setRetryNonce(0);
     retryCountRef.current = 0;
+    // A cached image can finish before onLoad is wired up; check it directly.
+    const img = imgRef.current;
+    if (img && img.complete && img.naturalWidth > 0) {
+      setImageLoaded(true);
+    }
   }, [context.render.id, imageUrl]);
 
   function handleImageError() {
@@ -857,7 +907,28 @@ function HeroSection({
   }
 
   return (
-    <section aria-label="Active render hero" className="mb-8">
+    <section ref={ref} aria-label="Active render hero" className="mb-8 scroll-mt-4">
+      {isNewRequest && (
+        <div
+          role="status"
+          className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded border border-accent bg-surface-elevated px-4 py-3 text-sm"
+        >
+          <p className="text-foreground">
+            <span className="font-semibold">
+              {context.dr.renders.length} new renders from Design Request #{context.requestNumber}.
+            </span>{" "}
+            You are viewing {context.requestNumber}.{context.renderNumber}. Click a thumbnail
+            below the image to compare, then choose the one you like.
+          </p>
+          <button
+            type="button"
+            onClick={onDismissNew}
+            className="text-xs font-medium text-muted hover:text-foreground"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <p className="text-sm font-semibold text-foreground">
           {getRenderBreadcrumb(context)}
@@ -870,14 +941,19 @@ function HeroSection({
       </div>
 
       <div className="grid items-start gap-6 lg:grid-cols-[minmax(60vw,1fr)_minmax(320px,380px)]">
-        <div className="flex h-[62vh] min-h-[520px] items-center justify-center overflow-hidden rounded border border-default bg-surface shadow-sm max-lg:h-[52vh] max-lg:min-h-[360px] lg:min-w-[60vw]">
+        <div className="min-w-0">
+          <div className="flex h-[62vh] min-h-[520px] items-center justify-center overflow-hidden rounded border border-default bg-surface shadow-sm max-lg:h-[52vh] max-lg:min-h-[360px] lg:min-w-[60vw]">
           {imageUrl ? (
             <div className="relative h-full w-full">
               {!imageLoaded && !imageFailed && (
                 <div
                   aria-label="Loading active render"
-                  className="absolute inset-0 animate-pulse bg-gradient-to-r from-surface via-surface-elevated to-surface"
-                />
+                  className="absolute inset-0 flex items-center justify-center bg-surface-elevated"
+                >
+                  <span className="animate-pulse rounded-full border border-default px-3 py-1 text-xs font-medium text-muted">
+                    Loading render…
+                  </span>
+                </div>
               )}
               {imageFailed ? (
                 <div className="flex h-full w-full flex-col items-center justify-center gap-3 text-center">
@@ -893,11 +969,12 @@ function HeroSection({
               ) : (
                 <img
                   key={`${context.render.id}-${retryNonce}`}
+                  ref={imgRef}
                   src={displayedImageUrl ?? undefined}
                   alt="Active render preview"
                   onLoad={() => setImageLoaded(true)}
                   onError={handleImageError}
-                  className={`h-full w-full object-contain transition-opacity duration-150 ${
+                  className={`relative h-full w-full object-contain transition-opacity duration-150 ${
                     imageLoaded ? "opacity-100" : "opacity-0"
                   }`}
                 />
@@ -907,6 +984,53 @@ function HeroSection({
             <div className="flex h-full w-full items-center justify-center text-sm font-medium text-muted">
               No render image available
             </div>
+          )}
+          </div>
+
+          {context.dr.renders.length > 1 && (
+            <nav
+              aria-label="Renders in this design request"
+              className="mt-3 flex flex-wrap gap-3"
+            >
+              {context.dr.renders.map((sibling, index) => {
+                const label = `${context.requestNumber}.${index + 1}`;
+                const isCurrent = sibling.id === context.render.id;
+                return (
+                  <button
+                    key={sibling.id}
+                    type="button"
+                    onClick={() => onActivateRender(sibling.id)}
+                    aria-current={isCurrent ? "true" : undefined}
+                    aria-label={`View Render ${label}${sibling.is_chosen ? " (chosen)" : ""}`}
+                    className={`relative h-20 w-28 overflow-hidden rounded border-2 bg-surface transition ${
+                      isCurrent
+                        ? "border-accent ring-2 ring-accent/40"
+                        : "border-default hover:border-accent"
+                    }`}
+                  >
+                    {sibling.image_url && (
+                      <img
+                        src={sibling.image_url}
+                        alt=""
+                        className="h-full w-full object-cover"
+                      />
+                    )}
+                    <span className="absolute bottom-1 left-1 rounded bg-surface-elevated/90 px-1.5 py-0.5 text-[11px] font-semibold text-foreground">
+                      {label}
+                    </span>
+                    {sibling.is_chosen && (
+                      <span
+                        aria-hidden="true"
+                        title="Chosen render"
+                        className="absolute right-1 top-1 rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-bold text-accent-foreground"
+                      >
+                        ✓
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </nav>
           )}
         </div>
 
@@ -960,6 +1084,8 @@ function HeroSection({
           <ProjectDimensionsPanel
             dr={context.dr}
             chosenRenderId={context.render.id}
+            dimensionStatus={dimensionStatus}
+            onRetryDimensions={onRetryDimensions}
             dimensionValues={dimensionValues}
             materialsLlm={materialsLlm}
             materialsModel={materialsModel}
@@ -1002,7 +1128,7 @@ function HeroSection({
       )}
     </section>
   );
-}
+});
 
 interface ProjectSummaryProps {
   project: ProjectDetail;
@@ -1404,6 +1530,8 @@ function RenderCard({
 interface ProjectDimensionsPanelProps {
   dr: DesignRequestOut;
   chosenRenderId: number;
+  dimensionStatus: DimensionStatus;
+  onRetryDimensions: () => void;
   dimensionValues: Record<string, string>;
   materialsLlm: string;
   materialsModel: string;
@@ -1423,6 +1551,8 @@ interface ProjectDimensionsPanelProps {
 function ProjectDimensionsPanel({
   dr,
   chosenRenderId,
+  dimensionStatus,
+  onRetryDimensions,
   dimensionValues,
   materialsLlm,
   materialsModel,
@@ -1458,6 +1588,30 @@ function ProjectDimensionsPanel({
       tabIndex={-1}
     >
       <h3 className="text-lg font-semibold text-foreground">Project Dimensions</h3>
+
+      {fields.length > 0 && dimensionStatus?.state === "loading" && (
+        <p role="status" className="text-xs text-muted">
+          <span className="animate-pulse">Auto-filling dimensions from the render…</span>
+        </p>
+      )}
+      {fields.length > 0 && dimensionStatus?.state === "done" && (
+        <p className="text-xs text-muted">
+          Auto-filled from the render; adjust anything that looks off.
+        </p>
+      )}
+      {fields.length > 0 && dimensionStatus?.state === "error" && (
+        <div role="alert" className="rounded border border-danger bg-surface px-3 py-2 text-xs">
+          <p className="text-danger">Couldn't auto-fill dimensions: {dimensionStatus.message}</p>
+          <button
+            type="button"
+            onClick={onRetryDimensions}
+            className="mt-1 font-medium text-accent hover:underline"
+          >
+            Try again
+          </button>
+          <span className="text-muted"> or type them in below.</span>
+        </div>
+      )}
 
       {fields.length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1496,12 +1650,13 @@ function ProjectDimensionsPanel({
             </label>
           ))}
         </div>
-        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="mt-3 space-y-4">
           <ModelPicker
             label="Materials model"
             provider={materialsProviderEntry}
             value={materialsModel}
             loading={modelsLoading}
+            compact
             onChange={onMaterialsModelChange}
           />
           <ModelPicker
@@ -1509,6 +1664,7 @@ function ProjectDimensionsPanel({
             provider={groundingProviderEntry}
             value={groundingModel}
             loading={modelsLoading}
+            compact
             onChange={onGroundingModelChange}
           />
         </div>

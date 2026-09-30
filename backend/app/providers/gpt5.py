@@ -11,6 +11,11 @@ from app.providers.build_sheet_schema import (
     build_user_message,
     image_media_type,
 )
+from app.providers.dimension_defaults import (
+    DIMENSION_SYSTEM_PROMPT,
+    build_dimension_message,
+    parse_dimension_json,
+)
 from app.providers.model_catalog import default_model_for
 
 # Default OpenAI text model; any GPT-5.x / GPT-6.x model from the catalog can be passed in.
@@ -50,6 +55,48 @@ class Gpt5Adapter(MaterialsAdapter):
 
     def __init__(self, model: str | None = None) -> None:
         self.model = model or _MODEL
+
+    async def suggest_dimension_defaults(
+        self,
+        render_image_bytes: bytes,
+        feature_categories: list[str],
+        lot_size_sqft: float | None,
+        house_sqft: float | None,
+    ) -> dict[str, str]:
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise MissingApiKeyError(
+                missing_api_key_message("OPENAI_API_KEY", "dimension defaults")
+            )
+
+        image_b64 = base64.b64encode(render_image_bytes).decode()
+        media_type = image_media_type(render_image_bytes)
+        client = AsyncOpenAI(api_key=api_key)
+        response = await client.chat.completions.create(
+            model=self.model,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": DIMENSION_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{media_type};base64,{image_b64}"},
+                        },
+                        {
+                            "type": "text",
+                            "text": build_dimension_message(
+                                feature_categories, lot_size_sqft, house_sqft
+                            ),
+                        },
+                    ],
+                },
+            ],
+            reasoning_effort=_REASONING_EFFORT,
+            max_completion_tokens=4096,
+        )
+        return parse_dimension_json(_response_text(response))
 
     async def generate_build_sheet(
         self,

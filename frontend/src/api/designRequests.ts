@@ -197,8 +197,16 @@ export async function chooseRender(renderId: number): Promise<RenderOut> {
 
 export async function getDimensionDefaults(
   renderId: number,
+  preference: BuildSheetModelChoices & { materialsLlm?: string } = {},
 ): Promise<Record<string, string | number>> {
-  const res = await fetch(`/api/renders/${renderId}/dimension-defaults`, { method: "POST" });
+  const body: Record<string, string> = {};
+  if (preference.materialsLlm) body.materials_llm = preference.materialsLlm;
+  if (preference.materialsModel) body.materials_model = preference.materialsModel;
+  const res = await fetch(`/api/renders/${renderId}/dimension-defaults`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
   if (!res.ok) {
     throw new Error(
       await parseApiError(res, `Failed to get dimension defaults: ${res.status}`),

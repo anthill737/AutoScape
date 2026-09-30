@@ -9,6 +9,8 @@ interface ModelPickerProps {
   value: string;
   loading?: boolean;
   disabled?: boolean;
+  /** Narrow layout: shorter option text, details stacked below. */
+  compact?: boolean;
   onChange: (modelId: string) => void;
 }
 
@@ -30,21 +32,27 @@ function costSigns(rank: number | null): string {
   return "$".repeat(rank);
 }
 
-/** Short text used inside the native option so the dropdown itself is comparable. */
-function optionLabel(m: ModelInfo, badges: ReturnType<typeof computeModelBadges>): string {
-  const parts = [m.display_name, qualityDots(m.quality), costSigns(m.cost_rank)];
+/** Text inside the native option, so the dropdown itself is comparable. */
+function optionLabel(
+  m: ModelInfo,
+  badges: ReturnType<typeof computeModelBadges>,
+  compact: boolean,
+): string {
+  const parts = [m.display_name];
+  if (!compact) parts.push(qualityDots(m.quality), costSigns(m.cost_rank));
   if (m.recommended) parts.push("Recommended");
   else if (badges.bestQualityId === m.id) parts.push("Best quality");
   else if (badges.cheapestId === m.id) parts.push("Cheapest");
-  if (!m.current) parts.push("older");
+  if (!m.current) parts.push("older / snapshot");
   return parts.join(" · ");
 }
 
 /**
- * Picks a vendor model with enough context to choose: each option shows quality dots
- * and a cost band, the selected model gets a summary line, and a "Compare" table lays
- * every current model side by side. Dated snapshots and retired ids are hidden unless
- * "Show older" is ticked.
+ * Picks a vendor model with enough context to choose: every model the vendor lists is
+ * shown, each option carries quality dots and a cost band, the selected model gets a
+ * summary card (price, note, id), and a "Compare" table lays them side by side with
+ * Best quality / Cheapest / Recommended badges. Dated snapshots and retired ids are
+ * marked "older / snapshot" and can be hidden with one checkbox.
  */
 export default function ModelPicker({
   label,
@@ -52,9 +60,10 @@ export default function ModelPicker({
   value,
   loading = false,
   disabled = false,
+  compact = false,
   onChange,
 }: ModelPickerProps) {
-  const [showOlder, setShowOlder] = useState(false);
+  const [hideOlder, setHideOlder] = useState(false);
   const [compare, setCompare] = useState(false);
   const compareId = useId();
 
@@ -62,14 +71,22 @@ export default function ModelPicker({
   const badges = useMemo(() => computeModelBadges(allOptions), [allOptions]);
   const selected = allOptions.find((m) => m.id === value);
   // Keep the selected model visible even if it is an older one.
-  const visible = allOptions.filter((m) => showOlder || m.current || m.id === value);
+  const visible = allOptions.filter((m) => !hideOlder || m.current || m.id === value);
   const olderCount = allOptions.filter((m) => !m.current).length;
+  const currentCount = allOptions.length - olderCount;
   const hint = statusHint(provider, loading);
 
   return (
     <div className="min-w-0 space-y-2">
       <label className="block text-xs font-medium text-foreground">
-        <span className="mb-1 block">{label}</span>
+        <span className="mb-1 flex items-baseline justify-between gap-2">
+          <span>{label}</span>
+          {provider && (
+            <span className="font-normal text-muted">
+              {currentCount} current{olderCount > 0 ? ` + ${olderCount} older` : ""}
+            </span>
+          )}
+        </span>
         <select
           aria-label={label}
           value={value}
@@ -80,15 +97,13 @@ export default function ModelPicker({
           {visible.length === 0 && <option value="">No models available</option>}
           {visible.map((m) => (
             <option key={m.id} value={m.id}>
-              {optionLabel(m, badges)}
+              {optionLabel(m, badges, compact)}
             </option>
           ))}
         </select>
       </label>
 
-      {selected && (
-        <SelectedSummary model={selected} badges={badges} />
-      )}
+      {selected && <SelectedSummary model={selected} badges={badges} />}
 
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
         <button
@@ -104,11 +119,11 @@ export default function ModelPicker({
           <label className="flex cursor-pointer items-center gap-1.5 text-muted">
             <input
               type="checkbox"
-              checked={showOlder}
-              onChange={(e) => setShowOlder(e.target.checked)}
+              checked={hideOlder}
+              onChange={(e) => setHideOlder(e.target.checked)}
               className="h-3.5 w-3.5"
             />
-            Show older & snapshot models ({olderCount})
+            Hide older & snapshot models ({olderCount})
           </label>
         )}
       </div>
@@ -150,7 +165,7 @@ function badgesFor(m: ModelInfo, badges: ReturnType<typeof computeModelBadges>) 
   if (m.recommended) out.push({ text: "Recommended", tone: "accent" });
   if (badges.bestQualityId === m.id) out.push({ text: "Best quality", tone: "accent" });
   if (badges.cheapestId === m.id) out.push({ text: "Cheapest", tone: "accent" });
-  if (!m.current) out.push({ text: "Older", tone: "muted" });
+  if (!m.current) out.push({ text: "Older / snapshot", tone: "muted" });
   else if (TIER_LABEL[m.tier]) out.push({ text: TIER_LABEL[m.tier], tone: "muted" });
   return out;
 }

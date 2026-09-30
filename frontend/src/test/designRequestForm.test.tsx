@@ -168,7 +168,7 @@ describe("ModelPicker — comparison", () => {
     const select = within(form).getByRole("combobox", { name: /Image model/i }) as HTMLSelectElement;
     await waitFor(() => expect(select.value).toBe("gpt-image-2.5-flare"));
 
-    const flare = within(select).getByRole("option", { name: /GPT Image 2.5 Flare/i });
+    const flare = within(select).getByRole("option", { name: /^GPT Image 2.5 Flare ·/i });
     expect(flare.textContent).toContain("●●●●○");
     expect(flare.textContent).toContain("$$");
     expect(flare.textContent).toContain("Recommended");
@@ -178,17 +178,19 @@ describe("ModelPicker — comparison", () => {
     expect(within(form).getAllByText("Recommended").length).toBeGreaterThan(0);
   });
 
-  it("hides dated snapshots until 'Show older' is ticked", async () => {
+  it("lists every model, marks snapshots as older, and can hide them", async () => {
     const form = await openNewForm();
     const select = within(form).getByRole("combobox", { name: /Image model/i });
+    const snapshot = within(select).getByRole("option", { name: /2026 09 08/ });
+    expect(snapshot.textContent).toContain("older / snapshot");
+    expect(within(form).getByText(/2 current \+ 1 older/)).toBeInTheDocument();
+
+    await userEvent.click(
+      within(form).getByRole("checkbox", { name: /Hide older & snapshot models \(1\)/i }),
+    );
     expect(
       within(select).queryByRole("option", { name: /2026 09 08/ }),
     ).not.toBeInTheDocument();
-
-    await userEvent.click(
-      within(form).getByRole("checkbox", { name: /Show older & snapshot models \(1\)/i }),
-    );
-    expect(within(select).getByRole("option", { name: /2026 09 08/ })).toBeInTheDocument();
   });
 
   it("opens a comparison table with Best quality and Cheapest badges and selects from it", async () => {
@@ -205,5 +207,114 @@ describe("ModelPicker — comparison", () => {
     await userEvent.click(within(sunburstRow).getByRole("button", { name: /Use GPT Image 2.5 Sunburst/i }));
     const select = within(form).getByRole("combobox", { name: /Image model/i }) as HTMLSelectElement;
     expect(select.value).toBe("gpt-image-2.5-sunburst");
+  });
+});
+
+describe("Hero — new renders and dimension auto-fill", () => {
+  const threeRenders = [1, 2, 3].map((n) => ({
+    id: n,
+    design_request_id: 10,
+    image_path: `/${n}.png`,
+    image_url: `/renders/${n}`,
+    is_chosen: n === 2,
+    created_at: "2024-06-01T00:00:00Z",
+  }));
+  const projectWithThree = {
+    ...projectWithRender,
+    design_requests: [{ ...projectWithRender.design_requests[0], renders: threeRenders }],
+  };
+
+  function mockByUrl(handlers: (url: string, init?: RequestInit) => unknown) {
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation(async (url: string, init?: RequestInit) => {
+      const out = handlers(url, init);
+      if (out !== undefined) return out;
+      return { ok: false, status: 404, json: async () => ({ detail: "Not found" }) };
+    });
+  }
+
+  it("shows a filmstrip of sibling renders under the hero and switches between them", async () => {
+    mockByUrl((url) => {
+      if (url === "/api/projects/1") return { ok: true, json: async () => projectWithThree };
+      return undefined;
+    });
+    renderAt("/projects/1");
+
+    const strip = await screen.findByRole("navigation", { name: /Renders in this design request/i });
+    const thumbs = within(strip).getAllByRole("button");
+    expect(thumbs.map((b) => b.getAttribute("aria-label"))).toEqual([
+      "View Render 1.1",
+      "View Render 1.2 (chosen)",
+      "View Render 1.3",
+    ]);
+    // Default active render is the chosen one.
+    expect(thumbs[1]).toHaveAttribute("aria-current", "true");
+
+    await userEvent.click(thumbs[2]);
+    await waitFor(() => expect(thumbs[2]).toHaveAttribute("aria-current", "true"));
+    expect(screen.getAllByText(/Design Request #1 · Render 3 of 3/).length).toBeGreaterThan(0);
+  });
+
+  it("announces freshly generated renders and scrolls to the hero", async () => {
+    const created = {
+      ...projectWithRender.design_requests[0],
+      id: 11,
+      renders: threeRenders.map((r) => ({ ...r, id: r.id + 10, design_request_id: 11, is_chosen: false })),
+    };
+    mockByUrl((url, init) => {
+      if (url === "/api/projects/1") return { ok: true, json: async () => emptyProject };
+      if (url === "/api/projects/1/design-requests" && init?.method === "POST") {
+        return { ok: true, json: async () => created };
+      }
+      return undefined;
+    });
+    renderAt("/projects/1");
+    await userEvent.click(await screen.findByRole("button", { name: /New Design Request/i }));
+    await userEvent.click(screen.getByRole("button", { name: /Generate Renders/i }));
+
+    const banner = await screen.findByRole("status");
+    expect(banner).toHaveTextContent(/3 new renders from Design Request #1/);
+    expect(banner).toHaveTextContent(/You are viewing 1\.1/);
+    expect(screen.getByRole("navigation", { name: /Renders in this design request/i })).toBeInTheDocument();
+
+    await userEvent.click(within(banner).getByRole("button", { name: /Dismiss/i }));
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("sends the materials preference when auto-filling dimensions and shows failures with a retry", async () => {
+    let attempts = 0;
+    mockByUrl((url, init) => {
+      if (url === "/api/projects/1") return { ok: true, json: async () => projectWithThree };
+      if (url === "/api/renders/2/dimension-defaults" && init?.method === "POST") {
+        attempts += 1;
+        if (attempts === 1) {
+          return {
+            ok: false,
+            status: 400,
+            json: async () => ({ detail: "No text-model API key is set (ANTHROPIC_API_KEY, ...)" }),
+          };
+        }
+        return { ok: true, json: async () => ({ patio_width_ft: "14" }) };
+      }
+      return undefined;
+    });
+    renderAt("/projects/1");
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/Couldn't auto-fill dimensions: No text-model API key is set/);
+
+    const firstCall = (fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+      ([url, init]) => url === "/api/renders/2/dimension-defaults" && (init as RequestInit)?.method === "POST",
+    );
+    expect(JSON.parse((firstCall?.[1] as RequestInit).body as string)).toEqual({
+      materials_llm: "claude_sonnet",
+      materials_model: "claude-opus-5-5",
+    });
+
+    await userEvent.click(within(alert).getByRole("button", { name: /Try again/i }));
+    await waitFor(() => {
+      expect((screen.getByRole("spinbutton", { name: /Patio Width/i }) as HTMLInputElement).value).toBe("14");
+    });
+    expect(screen.getByText(/Auto-filled from the render/)).toBeInTheDocument();
+    expect(attempts).toBe(2);
   });
 });

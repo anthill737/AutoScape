@@ -125,6 +125,10 @@ backend logs a `[models]` warning at startup if a default model has disappeared 
 Defaults live in `backend/app/providers/model_catalog.py` (`PROVIDERS`). Each Design Request
 and Build Sheet records the model that produced it.
 
+Dimension suggestions (the auto-filled Project Dimensions fields) use your selected Build
+Sheet vendor when its key is set, otherwise the first text vendor with a key (Anthropic, then
+OpenAI, then Google). If none is configured the panel says so and you can type values in.
+
 ### Image provider quota guidance
 
 Google's Gemini image models (`gemini-3.1-flash-image` and friends) have **no free-tier

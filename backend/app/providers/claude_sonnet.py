@@ -26,35 +26,11 @@ _BUILD_SHEET_SCHEMA = BUILD_SHEET_SCHEMA
 _build_user_message = build_user_message
 _image_media_type = image_media_type
 
-_DIMENSION_SYSTEM_PROMPT = (
-    "You are a landscape design assistant. Given a rendered design image and project details, "
-    "suggest reasonable default dimensions for the features present.\n\n"
-    "Respond with ONLY valid JSON (no markdown, no explanation) where keys are snake_case "
-    'dimension field names (e.g. "deck_width_ft", "deck_length_ft") and values are numeric '
-    'strings (e.g. "12", "16").\n\n'
-    "Rules:\n"
-    "- Include all relevant dimensions for each feature category provided\n"
-    "- Use feet as the unit suffix (e.g. _ft, _sqft)\n"
-    "- Infer reasonable defaults from the image and lot size\n"
-    "- Return only the JSON object, nothing else"
+from app.providers.dimension_defaults import (
+    DIMENSION_SYSTEM_PROMPT as _DIMENSION_SYSTEM_PROMPT,
 )
-
-
-def _build_dimension_message(
-    feature_categories: list[str],
-    lot_size_sqft: float | None,
-    house_sqft: float | None,
-) -> str:
-    features_str = ", ".join(feature_categories) if feature_categories else "General landscaping"
-    lot_str = f"{lot_size_sqft} sqft" if lot_size_sqft else "unknown"
-    house_str = f"{house_sqft} sqft" if house_sqft else "unknown"
-    return (
-        f"Feature Categories: {features_str}\n"
-        f"Lot size: {lot_str}\n"
-        f"House size: {house_str}\n\n"
-        "Based on the rendered design image and the project details above, "
-        "suggest reasonable default dimensions for the features."
-    )
+from app.providers.dimension_defaults import build_dimension_message as _build_dimension_message
+from app.providers.dimension_defaults import parse_dimension_json
 
 
 def _image_block(image_b64: str, media_type: str) -> dict:
@@ -97,7 +73,7 @@ async def suggest_dimension_defaults(
         None,
         lambda: _call_dimension_sync(client, image_b64, media_type, user_text, model or _MODEL),
     )
-    return json.loads(strip_code_fences(raw))
+    return parse_dimension_json(raw)
 
 
 def _call_dimension_sync(
@@ -126,6 +102,17 @@ class ClaudeSonnetAdapter(MaterialsAdapter):
 
     def __init__(self, model: str | None = None) -> None:
         self.model = model or _MODEL
+
+    async def suggest_dimension_defaults(
+        self,
+        render_image_bytes: bytes,
+        feature_categories: list[str],
+        lot_size_sqft: float | None,
+        house_sqft: float | None,
+    ) -> dict[str, str]:
+        return await suggest_dimension_defaults(
+            render_image_bytes, feature_categories, lot_size_sqft, house_sqft, model=self.model
+        )
 
     async def generate_build_sheet(
         self,

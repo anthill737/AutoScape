@@ -87,6 +87,14 @@ class BuildSheetCreate(BaseModel):
     _clean_grounding_model = field_validator("grounding_model")(_clean_model_id)
 
 
+class DimensionDefaultsRequest(BaseModel):
+    # Preferred text provider/model for the suggestion; falls back to any configured vendor.
+    materials_llm: Optional[str] = None
+    materials_model: Optional[str] = None
+
+    _clean_materials_model = field_validator("materials_model")(_clean_model_id)
+
+
 class BuildSheetOut(BaseModel):
     id: int
     render_id: int

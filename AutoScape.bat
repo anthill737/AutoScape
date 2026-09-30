@@ -220,7 +220,10 @@ if not exist "frontend\node_modules\vite" (
 :: terminated when this console window is closed (Windows kills the whole group).
 :: Use relative "cd /d backend" -- the new cmd.exe inherits our project-root cwd.
 echo  [AutoScape] Backend on http://localhost:!CHOSEN_PORT!
-start /b "" cmd /c "cd /d backend && !UV_CMD! run uvicorn app.main:app --reload --port !CHOSEN_PORT! >> !BLOG_CHILD! 2>&1"
+:: No --reload here: the launcher is for running the app, not editing it, and uvicorn's
+:: file watcher has been seen to print "Reloading..." and never restart on Windows,
+:: leaving stale code serving. Developers use the two-terminal flow in RUN.md instead.
+start /b "" cmd /c "cd /d backend && !UV_CMD! run uvicorn app.main:app --port !CHOSEN_PORT! >> !BLOG_CHILD! 2>&1"
 
 :: ---- Start frontend ----
 echo  [AutoScape] Starting frontend on port 5173...

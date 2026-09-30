@@ -21,7 +21,7 @@ from app.domain.build_sheet_validation import validate_build_sheet_material_urls
 from app.domain.retailers import APPROVED_RETAILERS
 from app.models import BuildSheet, DesignRequest, Project, Render
 from app.providers.base import MissingApiKeyError
-from app.providers.claude_sonnet import suggest_dimension_defaults
+from app.providers.dimension_defaults import suggest_dimension_defaults
 from app.providers.exceptions import ImageProviderAuthError, ImageProviderQuotaError
 from app.providers.image_provider import ImageProvider
 from app.providers.materials_llm import MaterialsLLM
@@ -33,6 +33,7 @@ from app.schemas import (
     BuildSheetOut,
     DesignRequestCreate,
     DesignRequestOut,
+    DimensionDefaultsRequest,
     ModelCatalogOut,
     ProjectDetail,
     ProjectListItem,
@@ -522,8 +523,15 @@ def get_render_image(render_id: int, db: Session = Depends(get_db)) -> FileRespo
 @app.post("/api/renders/{render_id}/dimension-defaults", status_code=200)
 async def get_dimension_defaults(
     render_id: int,
+    body: DimensionDefaultsRequest | None = Body(None),
     db: Session = Depends(get_db),
 ) -> dict:
+    """Suggest dimensions for the render's features.
+
+    Uses the requested materials provider when its key is set, otherwise the first text
+    vendor with a key (Anthropic, then OpenAI, then Google), so the panel still auto-fills
+    when one vendor is not configured.
+    """
     render = db.get(Render, render_id)
     if render is None:
         raise HTTPException(status_code=404, detail="Render not found")
@@ -556,9 +564,21 @@ async def get_dimension_defaults(
             feature_categories=feature_categories,
             lot_size_sqft=lot_size_sqft,
             house_sqft=house_sqft,
+            materials_llm=body.materials_llm if body else None,
+            model=body.materials_model if body else None,
         )
     except MissingApiKeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        detail = f"Dimension suggestions failed: {exc.__class__.__name__}: {exc}"
+        status_code = _provider_error_status(exc)
+        logger.warning(
+            "Dimension suggestion failed; returning HTTP %s for render_id=%s: %s",
+            status_code,
+            render_id,
+            detail,
+        )
+        raise HTTPException(status_code=status_code, detail=detail)
 
     return defaults
 

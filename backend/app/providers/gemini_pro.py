@@ -12,6 +12,11 @@ from app.providers.build_sheet_schema import (
     image_media_type,
     strip_code_fences,
 )
+from app.providers.dimension_defaults import (
+    DIMENSION_SYSTEM_PROMPT,
+    build_dimension_message,
+    parse_dimension_json,
+)
 from app.providers.model_catalog import default_model_for
 
 # Default Gemini text model; any generateContent-capable Gemini model can be passed in.
@@ -29,6 +34,50 @@ class GeminiProAdapter(MaterialsAdapter):
 
     def __init__(self, model: str | None = None) -> None:
         self.model = model or _MODEL
+
+    async def suggest_dimension_defaults(
+        self,
+        render_image_bytes: bytes,
+        feature_categories: list[str],
+        lot_size_sqft: float | None,
+        house_sqft: float | None,
+    ) -> dict[str, str]:
+        api_key = os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            raise MissingApiKeyError(
+                missing_api_key_message("GOOGLE_API_KEY", "dimension defaults")
+            )
+
+        client = genai.Client(api_key=api_key)
+        user_text = build_dimension_message(feature_categories, lot_size_sqft, house_sqft)
+        loop = asyncio.get_running_loop()
+        raw = await loop.run_in_executor(
+            None,
+            lambda: _extract_response_text(
+                client.models.generate_content(
+                    model=self.model,
+                    contents=[
+                        types.Content(
+                            parts=[
+                                types.Part(
+                                    inline_data=types.Blob(
+                                        mime_type=image_media_type(render_image_bytes),
+                                        data=render_image_bytes,
+                                    )
+                                ),
+                                types.Part(text=user_text),
+                            ]
+                        )
+                    ],
+                    config=types.GenerateContentConfig(
+                        system_instruction=DIMENSION_SYSTEM_PROMPT,
+                        response_mime_type="application/json",
+                        max_output_tokens=4096,
+                    ),
+                )
+            ),
+        )
+        return parse_dimension_json(raw)
 
     async def generate_build_sheet(
         self,
