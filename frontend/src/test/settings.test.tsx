@@ -191,7 +191,7 @@ describe("SettingsPage", () => {
     const anthropicRow = screen.getByLabelText("ANTHROPIC_API_KEY");
     await userEvent.click(within(anthropicRow).getByRole("button", { name: "Test" }));
     await waitFor(() => {
-      expect(within(anthropicRow).getByText("X provider said no")).toBeInTheDocument();
+      expect(within(anthropicRow).getByText("provider said no")).toBeInTheDocument();
     });
 
     expect(fetch).toHaveBeenNthCalledWith(2, "/api/settings/keys/GOOGLE_API_KEY/test", {

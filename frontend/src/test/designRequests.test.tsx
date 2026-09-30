@@ -370,7 +370,7 @@ describe("ProjectDetailPage — submitting Design Request form", () => {
     await waitFor(() => {
       const warning = screen.getByText(detail);
       expect(warning).toBeInTheDocument();
-      expect(warning).toHaveClass("border-danger", "text-danger");
+      expect(warning).toHaveClass("alert-danger");
     });
   });
 

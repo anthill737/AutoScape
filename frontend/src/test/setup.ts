@@ -104,6 +104,15 @@ export const TEST_MODEL_CATALOG = {
   ],
 };
 
+// Space-type configs are fetched on every page too; serve the built-in list.
+vi.mock("../api/spaces", async () => {
+  const actual = await vi.importActual<typeof import("../api/spaces")>("../api/spaces");
+  return {
+    ...actual,
+    fetchSpaces: vi.fn(async () => actual.FALLBACK_SPACES),
+  };
+});
+
 vi.mock("../api/models", async () => {
   const actual = await vi.importActual<typeof import("../api/models")>("../api/models");
   return {
@@ -117,6 +126,8 @@ vi.mock("../api/models", async () => {
 afterEach(async () => {
   const { resetModelCatalogCache } = await import("../hooks/useModelCatalog");
   resetModelCatalogCache();
+  const { resetSpacesCache } = await import("../hooks/useSpaces");
+  resetSpacesCache();
   try {
     window.localStorage.clear();
   } catch {

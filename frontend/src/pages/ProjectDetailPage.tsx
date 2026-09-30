@@ -5,8 +5,6 @@ import { ApiError } from "../api/errors";
 import { findProvider, ModelCatalog, ProviderModels } from "../api/models";
 import {
   IMAGE_PROVIDERS,
-  STYLES,
-  QUALITY_TIERS,
   MATERIALS_LLMS,
   DEFAULT_MATERIALS_LLM,
   DesignRequestOut,
@@ -14,14 +12,21 @@ import {
   BuildSheetOut,
   MaterialItem,
   BuildStep,
-  seedComposedPrompt,
   createDesignRequest,
   chooseRender,
   getDimensionDefaults,
-  getDimensionFieldsForCategories,
   getBuildSheet,
   createBuildSheet,
 } from "../api/designRequests";
+import {
+  EXTERIOR_SPACE,
+  dimensionFieldsFor,
+  findSpace,
+  seedPromptFor,
+  spaceLabelFor,
+  type SpaceConfig,
+} from "../api/spaces";
+import { useSpaces } from "../hooks/useSpaces";
 import { exportBuildSheet } from "../utils/exportBuildSheet";
 import {
   loadModelSelection,
@@ -211,6 +216,11 @@ export default function ProjectDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Space config (outdoor vs interior vocabulary) for this project
+  const { spaces } = useSpaces();
+  const space: SpaceConfig = findSpace(spaces, project?.space_type);
+  const roomType: string | null = project?.room_type ?? null;
+
   // Model catalog (what each vendor currently offers) + remembered choices
   const { catalog: modelCatalog, loading: modelsLoading } = useModelCatalog();
   const savedSelectionRef = useRef(loadModelSelection());
@@ -234,8 +244,8 @@ export default function ProjectDetailPage() {
     savedSelection.groundingModel ?? "",
   );
   const [featureCategories, setFeatureCategories] = useState<string[]>([]);
-  const [style, setStyle] = useState<string>(STYLES[0]);
-  const [qualityTier, setQualityTier] = useState<string>(QUALITY_TIERS[0]);
+  const [style, setStyle] = useState<string>(EXTERIOR_SPACE.styles[0]);
+  const [qualityTier, setQualityTier] = useState<string>(EXTERIOR_SPACE.quality_tiers[0]);
   const [composedPrompt, setComposedPrompt] = useState<string>("");
   // Once the user edits the prompt we stop rewriting it when chips change.
   const [promptIsCustom, setPromptIsCustom] = useState(false);
@@ -427,12 +437,20 @@ export default function ProjectDetailPage() {
     }
   }, [project]);
 
+  useEffect(() => {
+    if (!space.styles.includes(style)) setStyle(space.styles[0]);
+    if (!space.quality_tiers.includes(qualityTier)) setQualityTier(space.quality_tiers[0]);
+    setFeatureCategories((prev) => prev.filter((c) => space.feature_categories.includes(c)));
+    // Only react to the space itself changing (project load); the guards above are cheap.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [space.id]);
+
   // Re-seed the prompt when chips change, unless the user has taken over the text.
   useEffect(() => {
     if (!promptIsCustom) {
-      setComposedPrompt(seedComposedPrompt(featureCategories, style, qualityTier));
+      setComposedPrompt(seedPromptFor(space, roomType, featureCategories, style, qualityTier));
     }
-  }, [featureCategories, style, qualityTier, promptIsCustom]);
+  }, [featureCategories, style, qualityTier, promptIsCustom, space, roomType]);
 
   useEffect(() => {
     if (!showForm || !pendingFormFocusRef.current) return;
@@ -448,7 +466,7 @@ export default function ProjectDetailPage() {
   function openForm() {
     setIterationParentRenderId(null);
     setPromptIsCustom(false);
-    setComposedPrompt(seedComposedPrompt(featureCategories, style, qualityTier));
+    setComposedPrompt(seedPromptFor(space, roomType, featureCategories, style, qualityTier));
     setSubmitError(null);
     setSubmitWarning(null);
     pendingFormFocusRef.current = true;
@@ -487,7 +505,7 @@ export default function ProjectDetailPage() {
   function switchToSitePhoto() {
     setIterationParentRenderId(null);
     setPromptIsCustom(false);
-    setComposedPrompt(seedComposedPrompt(featureCategories, style, qualityTier));
+    setComposedPrompt(seedPromptFor(space, roomType, featureCategories, style, qualityTier));
   }
 
   function editPrompt(value: string) {
@@ -497,7 +515,7 @@ export default function ProjectDetailPage() {
 
   function resetPrompt() {
     setPromptIsCustom(false);
-    setComposedPrompt(seedComposedPrompt(featureCategories, style, qualityTier));
+    setComposedPrompt(seedPromptFor(space, roomType, featureCategories, style, qualityTier));
   }
 
   function closeForm() {
@@ -660,23 +678,36 @@ export default function ProjectDetailPage() {
 
   return (
     <div className="min-h-screen bg-surface text-foreground">
-      <TopNav title={project ? project.address : "Loading..."} />
+      <TopNav
+        title={project ? project.address : "Loading..."}
+        crumb={{ label: "Projects", to: "/" }}
+      />
 
-      <main className="mx-auto max-w-none px-4 py-6">
+      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
         {loading && <p className="text-muted">Loading project…</p>}
-        {error && <p className="text-danger">{error}</p>}
+        {error && <p className="alert-danger">{error}</p>}
 
         {project && (
           <>
             <ProjectSummary
               project={project}
+              space={space}
               showNewRequestButton={!showForm}
               onNewRequest={openForm}
+            />
+
+            <ProgressStepper
+              project={project}
+              buildSheets={buildSheets}
+              activeRenderId={activeRenderId}
+              formOpen={showForm}
             />
 
             {showForm && (
               <DesignRequestForm
                 formRef={designRequestFormRef}
+                space={space}
+                roomType={roomType}
                 sitePhotoUrl={project.site_photo_url}
                 iterationSource={iterationSource}
                 featureCategories={featureCategories}
@@ -707,6 +738,7 @@ export default function ProjectDetailPage() {
             {activeContext && (
               <HeroSection
                 ref={heroRef}
+                space={space}
                 context={activeContext}
                 isNewRequest={justGeneratedRequestId === activeContext.dr.id}
                 onDismissNew={() => setJustGeneratedRequestId(null)}
@@ -752,18 +784,26 @@ export default function ProjectDetailPage() {
             )}
 
             {/* Design Tree section */}
-            <section aria-label="Design Tree">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-xl font-semibold text-foreground">
-                  Design Tree
-                </h2>
+            <section aria-label="Design Tree" className="mt-10">
+              <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
+                <div>
+                  <p className="as-eyebrow">History</p>
+                  <h2 className="text-xl font-semibold tracking-tight text-foreground">
+                    Design Tree
+                  </h2>
+                </div>
+                <p className="as-help">
+                  Every request and its three renders. Click a thumbnail to view it above.
+                </p>
               </div>
 
               {project.design_requests.length === 0 && !showForm && (
-                <p className="text-muted">
-                  No design requests yet. Click "New Design Request" above to get
-                  started.
-                </p>
+                <div className="as-card px-6 py-10 text-center">
+                  <p className="text-base font-semibold text-foreground">No design requests yet.</p>
+                  <p className="as-help mt-1">
+                    Click "New Design Request" above to generate your first three renders.
+                  </p>
+                </div>
               )}
 
               <div className="max-h-[75vh] space-y-4 overflow-y-auto pr-1">
@@ -799,6 +839,7 @@ type DimensionStatus =
   | null;
 
 interface HeroSectionProps {
+  space: SpaceConfig;
   context: ActiveRenderContext;
   isNewRequest: boolean;
   onDismissNew: () => void;
@@ -826,6 +867,7 @@ interface HeroSectionProps {
 
 const HeroSection = forwardRef<HTMLElement, HeroSectionProps>(function HeroSection(
   {
+  space,
   context,
   isNewRequest,
   onDismissNew,
@@ -911,7 +953,7 @@ const HeroSection = forwardRef<HTMLElement, HeroSectionProps>(function HeroSecti
       {isNewRequest && (
         <div
           role="status"
-          className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded border border-accent bg-surface-elevated px-4 py-3 text-sm"
+          className="alert-info mb-3 flex flex-wrap items-center justify-between gap-3 px-4 py-3"
         >
           <p className="text-foreground">
             <span className="font-semibold">
@@ -934,15 +976,13 @@ const HeroSection = forwardRef<HTMLElement, HeroSectionProps>(function HeroSecti
           {getRenderBreadcrumb(context)}
         </p>
         {context.render.is_chosen && (
-          <span className="rounded-full bg-accent px-2.5 py-1 text-xs font-semibold text-accent-foreground shadow-sm">
-            Chosen
-          </span>
+          <span className="pill-accent">Chosen</span>
         )}
       </div>
 
       <div className="grid items-start gap-6 lg:grid-cols-[minmax(60vw,1fr)_minmax(320px,380px)]">
         <div className="min-w-0">
-          <div className="flex h-[62vh] min-h-[520px] items-center justify-center overflow-hidden rounded border border-default bg-surface shadow-sm max-lg:h-[52vh] max-lg:min-h-[360px] lg:min-w-[60vw]">
+          <div className="flex h-[62vh] min-h-[520px] items-center justify-center overflow-hidden rounded-2xl border border-default bg-surface-sunken shadow-card max-lg:h-[52vh] max-lg:min-h-[360px] lg:min-w-[60vw]">
           {imageUrl ? (
             <div className="relative h-full w-full">
               {!imageLoaded && !imageFailed && (
@@ -961,7 +1001,7 @@ const HeroSection = forwardRef<HTMLElement, HeroSectionProps>(function HeroSecti
                   <button
                     type="button"
                     onClick={handleManualRetry}
-                    className="rounded-lg border border-default px-4 py-2 text-sm font-semibold text-accent transition hover:border-accent"
+                    className="btn-secondary text-accent"
                   >
                     Retry
                   </button>
@@ -1004,7 +1044,7 @@ const HeroSection = forwardRef<HTMLElement, HeroSectionProps>(function HeroSecti
                     aria-label={`View Render ${label}${sibling.is_chosen ? " (chosen)" : ""}`}
                     className={`relative h-20 w-28 overflow-hidden rounded border-2 bg-surface transition ${
                       isCurrent
-                        ? "border-accent ring-2 ring-accent/40"
+                        ? "border-accent ring-2 ring-accent-soft"
                         : "border-default hover:border-accent"
                     }`}
                   >
@@ -1034,28 +1074,29 @@ const HeroSection = forwardRef<HTMLElement, HeroSectionProps>(function HeroSecti
           )}
         </div>
 
-        <aside className="rounded border border-default bg-surface-elevated p-4 shadow-sm">
-          <div className="mb-4 space-y-2">
-            <p className="text-xs font-semibold uppercase text-muted">
-              Active Render
-            </p>
-            <p className="text-sm font-medium text-foreground">
-              {getHeroLabel(context)}
-            </p>
-            <div className="flex flex-wrap gap-2">
+        <aside className="as-card p-5">
+          <div className="space-y-4">
+            <div>
+              <p className="as-eyebrow">Active Render</p>
+              <p className="mt-1 text-sm font-medium text-foreground">
+                {getHeroLabel(context)}
+              </p>
+            </div>
+            <div className="as-well p-3 text-xs text-muted">
+              {context.render.is_chosen
+                ? "This is the chosen render. Set up its build sheet below, or iterate to refine it."
+                : "Like this one? Choose it to unlock the build sheet, or iterate to refine it."}
+            </div>
+            <div className="flex flex-col gap-2">
               <button
                 type="button"
                 onClick={onChoose}
                 disabled={context.render.is_chosen}
-                className="rounded bg-accent px-4 py-2 text-sm font-semibold text-accent-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:bg-border disabled:text-muted"
+                className="btn-primary w-full"
               >
                 Choose this Render
               </button>
-              <button
-                type="button"
-                onClick={onIterate}
-                className="rounded border border-default bg-surface-elevated px-4 py-2 text-sm font-semibold text-foreground hover:border-accent hover:text-accent"
-              >
+              <button type="button" onClick={onIterate} className="btn-secondary w-full">
                 Iterate from this Render
               </button>
               {context.render.is_chosen && (
@@ -1064,17 +1105,13 @@ const HeroSection = forwardRef<HTMLElement, HeroSectionProps>(function HeroSecti
                   onClick={() => {
                     window.setTimeout(focusBuildSheetArea, 0);
                   }}
-                  className="rounded border border-accent bg-surface px-4 py-2 text-sm font-semibold text-accent hover:bg-surface-elevated"
+                  className="btn-secondary w-full border-accent text-accent"
                 >
                   Build Sheet
                 </a>
               )}
               {imageUrl && (
-                <a
-                  href={imageUrl}
-                  download
-                  className="rounded border border-default bg-surface-elevated px-4 py-2 text-sm font-semibold text-foreground hover:border-accent hover:text-accent"
-                >
+                <a href={imageUrl} download className="btn-ghost w-full">
                   Download image
                 </a>
               )}
@@ -1084,6 +1121,7 @@ const HeroSection = forwardRef<HTMLElement, HeroSectionProps>(function HeroSecti
       </div>
 
       <ProjectDimensionsPanel
+        space={space}
         dr={context.dr}
         chosenRenderId={context.render.id}
         dimensionStatus={dimensionStatus}
@@ -1108,17 +1146,16 @@ const HeroSection = forwardRef<HTMLElement, HeroSectionProps>(function HeroSecti
         <div
           id={`build-sheet-render-${context.render.id}`}
           tabIndex={-1}
-          className="mt-12 scroll-mt-6 border-t border-default pt-10 focus:outline-none"
+          className="as-card mt-10 scroll-mt-6 p-5 focus:outline-none sm:p-8"
         >
           <div className="mb-6 flex flex-wrap items-baseline justify-between gap-3">
-            <h2 className="text-2xl font-bold tracking-tight text-foreground">Build Sheet</h2>
+            <div>
+              <p className="as-eyebrow">Step 4</p>
+              <h2 className="text-2xl font-bold tracking-tight text-foreground">Build Sheet</h2>
+            </div>
             <div className="flex items-center gap-3">
               <p className="text-sm text-muted">{getHeroLabel(context)}</p>
-              <button
-                type="button"
-                onClick={onRegenerate}
-                className="rounded-lg border border-default px-3 py-1.5 text-sm font-semibold text-foreground transition hover:border-accent hover:text-accent"
-              >
+              <button type="button" onClick={onRegenerate} className="btn-secondary btn-sm">
                 Regenerate
               </button>
             </div>
@@ -1132,60 +1169,122 @@ const HeroSection = forwardRef<HTMLElement, HeroSectionProps>(function HeroSecti
 
 interface ProjectSummaryProps {
   project: ProjectDetail;
+  space: SpaceConfig;
   showNewRequestButton: boolean;
   onNewRequest: () => void;
 }
 
-function ProjectSummary({ project, showNewRequestButton, onNewRequest }: ProjectSummaryProps) {
+function formatSizeDetails(project: ProjectDetail, space: SpaceConfig): string[] {
+  const details = project.space_details ?? {};
+  const parts: string[] = [];
+  for (const field of space.size_fields) {
+    const raw = details[field.key];
+    const value =
+      raw ??
+      (field.key === "lot_size_sqft" ? project.lot_size_sqft : undefined) ??
+      (field.key === "house_sqft" ? project.house_sqft : undefined);
+    if (value == null) continue;
+    const unit = field.key.endsWith("_sqft") ? "sqft" : "ft";
+    const name = field.label.replace(/\s*\(.*\)\s*$/, "");
+    parts.push(`${name} ${Number(value).toLocaleString()} ${unit}`);
+  }
+  return parts;
+}
+
+function ProjectSummary({ project, space, showNewRequestButton, onNewRequest }: ProjectSummaryProps) {
+  const label = project.space_label ?? spaceLabelFor(space, project.room_type);
+  const sizes = formatSizeDetails(project, space);
+  const count = project.design_requests.length;
   return (
     <section
       aria-label="Project summary"
-      className="mb-6 flex flex-wrap items-center justify-between gap-4 rounded border border-default bg-surface-elevated p-3 shadow-sm"
+      className="as-card mb-6 flex flex-wrap items-center justify-between gap-4 p-4"
     >
-      <div className="flex min-w-0 items-center gap-3">
+      <div className="flex min-w-0 items-center gap-4">
         {project.site_photo_url ? (
           <img
             src={project.site_photo_url}
-            alt="Site Photo"
-            className="h-16 w-24 shrink-0 rounded bg-surface object-contain"
+            alt={space.id === "interior" ? "Room photo" : "Site Photo"}
+            className="h-16 w-24 shrink-0 rounded-lg bg-surface-sunken object-cover"
           />
         ) : (
-          <div className="flex h-16 w-24 shrink-0 items-center justify-center rounded bg-surface text-center text-xs font-medium text-muted">
+          <div className="flex h-16 w-24 shrink-0 items-center justify-center rounded-lg bg-surface-sunken text-center text-xs font-medium text-muted">
             No Site Photo
           </div>
         )}
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-foreground">{project.address}</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="truncate text-base font-semibold tracking-tight text-foreground">
+              {project.address}
+            </p>
+            <span className="pill-accent">{label}</span>
+          </div>
           <p className="mt-1 text-xs text-muted">
-            Lot{" "}
-            <span className="font-medium text-foreground">
-              {project.lot_size_sqft != null
-                ? `${project.lot_size_sqft.toLocaleString()} sqft`
-                : "Not set"}
-            </span>
-            <span className="mx-2 text-border">|</span>
-            House{" "}
-            <span className="font-medium text-foreground">
-              {project.house_sqft != null
-                ? `${project.house_sqft.toLocaleString()} sqft`
-                : "Not set"}
-            </span>
-            <span className="mx-2 text-border">|</span>
-            {project.design_requests.length} design request
-            {project.design_requests.length === 1 ? "" : "s"}
+            {[...sizes, `${count} design request${count === 1 ? "" : "s"}`].join("  ·  ")}
           </p>
         </div>
       </div>
       {showNewRequestButton && (
-        <button
-          type="button"
-          onClick={onNewRequest}
-          className="rounded bg-accent px-4 py-2 text-sm font-semibold text-accent-foreground hover:opacity-90"
-        >
+        <button type="button" onClick={onNewRequest} className="btn-primary">
           New Design Request
         </button>
       )}
     </section>
+  );
+}
+
+interface ProgressStepperProps {
+  project: ProjectDetail;
+  buildSheets: Record<number, BuildSheetOut>;
+  activeRenderId: number | null;
+  formOpen: boolean;
+}
+
+/** Photo → Renders → Choose → Build Sheet, so the page always says what comes next. */
+function ProgressStepper({ project, buildSheets, activeRenderId, formOpen }: ProgressStepperProps) {
+  const renders = project.design_requests.flatMap((dr) => dr.renders);
+  const chosen = renders.find((r) => r.is_chosen) ?? null;
+  const hasSheet = renders.some((r) => buildSheets[r.id] != null);
+  const current = hasSheet ? 4 : chosen ? 3 : renders.length > 0 ? 2 : 1;
+  const steps = [
+    { n: 1, label: "Photo", hint: "Added" },
+    { n: 2, label: "Renders", hint: renders.length > 0 ? `${renders.length} made` : formOpen ? "Set up below" : "Generate" },
+    { n: 3, label: "Choose", hint: chosen ? "Render picked" : renders.length > 0 ? "Pick a favourite" : "Later" },
+    { n: 4, label: "Build Sheet", hint: hasSheet ? "Ready" : chosen ? "Set up under the render" : "Later" },
+  ];
+  void activeRenderId;
+  return (
+    <ol aria-label="Progress" className="mb-6 grid grid-cols-2 gap-2 sm:grid-cols-4">
+      {steps.map((step) => {
+        const state = step.n < current ? "done" : step.n === current ? "current" : "todo";
+        return (
+          <li
+            key={step.n}
+            aria-current={state === "current" ? "step" : undefined}
+            className={`flex items-center gap-3 rounded-xl border px-3 py-2 ${
+              state === "current"
+                ? "border-accent bg-accent-soft"
+                : state === "done"
+                  ? "border-default bg-surface-elevated"
+                  : "border-default bg-surface-elevated opacity-60"
+            }`}
+          >
+            <span
+              className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+                state === "todo" ? "bg-surface-sunken text-muted" : "bg-accent text-accent-foreground"
+              }`}
+              aria-hidden="true"
+            >
+              {state === "done" ? "✓" : step.n}
+            </span>
+            <span className="min-w-0">
+              <span className="block text-sm font-semibold text-foreground">{step.label}</span>
+              <span className="block truncate text-xs text-muted">{step.hint}</span>
+            </span>
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 
@@ -1224,7 +1323,7 @@ function DesignRequestCard({
 
   if (!isExpanded) {
     return (
-      <article className="overflow-hidden rounded border border-default bg-surface-elevated shadow-sm">
+      <article className="as-card overflow-hidden">
         <div className="flex w-full items-center gap-4 p-3">
           {stripRender ? (
             <button
@@ -1295,7 +1394,7 @@ function DesignRequestCard({
                 role="link"
                 {...{ href: `/projects/${project.id}/renders/${render.id}` }}
                 aria-label={`Open Render ${render.id}`}
-                className="rounded border border-default bg-surface-elevated px-2 py-1 text-xs font-semibold text-foreground hover:border-accent hover:text-accent focus:outline-none focus:ring-2 focus:ring-accent"
+                className="btn-secondary btn-sm"
                 onClick={(event) => {
                   event.preventDefault();
                   onActivateRender(render.id);
@@ -1528,6 +1627,7 @@ function RenderCard({
 }
 
 interface ProjectDimensionsPanelProps {
+  space: SpaceConfig;
   dr: DesignRequestOut;
   chosenRenderId: number;
   dimensionStatus: DimensionStatus;
@@ -1549,6 +1649,7 @@ interface ProjectDimensionsPanelProps {
 }
 
 function ProjectDimensionsPanel({
+  space,
   dr,
   chosenRenderId,
   dimensionStatus,
@@ -1570,7 +1671,7 @@ function ProjectDimensionsPanel({
 }: ProjectDimensionsPanelProps) {
   const materialsProviderEntry = findProvider(modelCatalog, materialsLlm);
   const groundingProviderEntry = modelCatalog.grounding[0];
-  const fields = getDimensionFieldsForCategories(dr.feature_categories);
+  const fields = dimensionFieldsFor(space, dr.feature_categories);
   const missing = fields.filter((f) => (dimensionValues[f.key] ?? "").trim() === "");
   const allFilled = missing.length === 0;
 
@@ -1584,13 +1685,14 @@ function ProjectDimensionsPanel({
     <section
       id={`dimensions-render-${chosenRenderId}`}
       aria-label="Build sheet setup"
-      className="mt-8 rounded-lg border border-default bg-surface-elevated p-5 shadow-sm sm:p-6"
+      className="as-card mt-8 p-5 sm:p-6"
       tabIndex={-1}
     >
       <div className="mb-5 flex flex-wrap items-baseline justify-between gap-3">
         <div>
-          <h3 className="text-lg font-semibold text-foreground">Build Sheet for this render</h3>
-          <p className="mt-1 text-sm text-muted">
+          <p className="as-eyebrow">Step 4</p>
+          <h3 className="as-title">Build Sheet for this render</h3>
+          <p className="as-help mt-1">
             Confirm the dimensions, pick the models, then generate a materials list, tool list,
             build steps, and cost range.
           </p>
@@ -1617,7 +1719,7 @@ function ProjectDimensionsPanel({
           </div>
 
           {fields.length > 0 && dimensionStatus?.state === "error" && (
-            <div role="alert" className="mb-3 rounded border border-danger bg-surface px-3 py-2 text-xs">
+            <div role="alert" className="alert-danger mb-3 text-xs">
               <p className="text-danger">Couldn't auto-fill dimensions: {dimensionStatus.message}</p>
               <button
                 type="button"
@@ -1648,7 +1750,7 @@ function ProjectDimensionsPanel({
                     aria-label={field.label}
                     value={dimensionValues[field.key] ?? ""}
                     onChange={(e) => onDimensionChange(field.key, e.target.value)}
-                    className="w-full rounded border border-default bg-surface px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-accent"
+                    className="field"
                   />
                 </div>
               ))}
@@ -1670,21 +1772,13 @@ function ProjectDimensionsPanel({
               {MATERIALS_LLMS.map((opt) => {
                 const on = materialsLlm === opt.value;
                 return (
-                  <label
-                    key={opt.value}
-                    className={`flex cursor-pointer select-none items-center gap-2 rounded-full border px-3 py-1.5 text-sm transition ${
-                      on
-                        ? "border-accent bg-surface text-foreground"
-                        : "border-default bg-surface-elevated text-foreground hover:border-accent"
-                    }`}
-                  >
+                  <label key={opt.value} className={`chip ${on ? "chip-on" : ""}`}>
                     <input
                       type="radio"
                       name={`materialsLlm-${chosenRenderId}`}
                       value={opt.value}
                       checked={on}
                       onChange={() => onLlmChange(opt.value)}
-                      className="h-3.5 w-3.5"
                     />
                     {opt.label}
                   </label>
@@ -1720,11 +1814,7 @@ function ProjectDimensionsPanel({
       {error && <p className="mt-5 text-sm text-danger">{error}</p>}
 
       <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-default pt-5">
-        <button
-          disabled={!allFilled || generating}
-          onClick={onGenerate}
-          className="rounded bg-accent px-5 py-2.5 text-sm font-semibold text-accent-foreground hover:opacity-90 disabled:opacity-50"
-        >
+        <button disabled={!allFilled || generating} onClick={onGenerate} className="btn-primary btn-lg">
           {generating ? "Generating Build Sheet…" : "Generate Build Sheet"}
         </button>
         <span className="text-xs text-muted">
@@ -1833,7 +1923,7 @@ function BuildSheetDisplay({
     <div className="space-y-8">
       {/* ───────────── Cost / skill banner ───────────── */}
       <div
-        className="as-fade-up relative overflow-hidden rounded-2xl border border-default bg-surface-elevated shadow-sm"
+        className="as-fade-up as-well relative overflow-hidden rounded-2xl"
         style={{ animationDelay: "0ms" }}
       >
         <div
@@ -1882,7 +1972,7 @@ function BuildSheetDisplay({
           <button
             onClick={handleExport}
             disabled={exporting}
-            className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-accent px-5 py-2.5 text-sm font-semibold text-accent-foreground shadow-sm transition hover:opacity-90 disabled:opacity-50"
+            className="btn-primary btn-lg shrink-0"
           >
             <Icon path={ICON.download} className="h-4 w-4" />
             {exporting ? "Exporting…" : "Export build sheet"}
@@ -1912,7 +2002,7 @@ function BuildSheetDisplay({
                       {!last && <span className="mt-1 w-px flex-1 bg-border" />}
                     </div>
                     {/* card */}
-                    <div className="flex-1 rounded-xl border border-default bg-surface-elevated p-4 shadow-sm">
+                    <div className="as-card flex-1 p-4">
                       <p className="text-sm leading-relaxed text-foreground">{step.description}</p>
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         {step.estimated_time && (
@@ -1945,7 +2035,7 @@ function BuildSheetDisplay({
                 {buildSheet.tool_list.map((tool: string, i: number) => (
                   <span
                     key={i}
-                    className="inline-flex items-center rounded-lg border border-default bg-surface-elevated px-3 py-1.5 text-sm text-foreground shadow-sm"
+                    className="chip cursor-default"
                   >
                     {tool}
                   </span>
@@ -1961,7 +2051,7 @@ function BuildSheetDisplay({
                 Assumptions
               </h3>
               <ul
-                className="space-y-2.5 rounded-xl border-l-2 border-accent bg-surface-elevated p-4 shadow-sm"
+                className="as-card space-y-2.5 border-l-4 border-l-accent p-4"
                 style={{ borderLeftColor: "var(--color-accent)" }}
               >
                 {assumptions.map((a, i) => (
@@ -1976,7 +2066,7 @@ function BuildSheetDisplay({
 
           {excluded.length > 0 && (
             <section className="as-fade-up" style={{ animationDelay: "240ms" }}>
-              <details className="group rounded-xl border border-default bg-surface-elevated shadow-sm">
+              <details className="as-card group">
                 <summary className="flex cursor-pointer list-none items-center gap-2 p-4 text-sm font-semibold text-foreground">
                   <Icon path={ICON.alert} className="h-4 w-4 text-muted" />
                   {excluded.length} material{excluded.length > 1 ? "s" : ""} excluded
@@ -2023,7 +2113,7 @@ function BuildSheetDisplay({
           Materials &amp; costs
         </h3>
         {hasMaterials ? (
-          <div className="overflow-hidden rounded-xl border border-default shadow-sm">
+          <div className="as-card overflow-hidden">
             <div className="overflow-x-auto">
               <table className="min-w-full text-sm">
                 <thead>
@@ -2074,7 +2164,7 @@ function BuildSheetDisplay({
                             href={item.product_url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 rounded-lg border border-default px-2.5 py-1 text-xs font-medium text-accent transition hover:border-accent"
+                            className="btn-secondary btn-sm text-accent"
                           >
                             View
                             <Icon path={ICON.external} className="h-3 w-3" />

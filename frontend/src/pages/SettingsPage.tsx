@@ -22,12 +22,6 @@ const EMPTY_TEST_STATES = Object.fromEntries(
   SETTINGS_KEYS.map((key) => [key.name, { status: "idle" }]),
 ) as Record<SettingsKeyName, TestState>;
 
-function statusPill(isSet: boolean) {
-  return isSet
-    ? "bg-surface-elevated text-success border-success"
-    : "bg-surface text-muted border-default";
-}
-
 export default function SettingsPage() {
   const [keys, setKeys] = useState<SettingsKeyStatus[]>([]);
   const [loading, setLoading] = useState(true);
@@ -126,18 +120,22 @@ export default function SettingsPage() {
 
   return (
     <div className="min-h-screen bg-surface text-foreground">
-      <TopNav title="Settings" />
+      <TopNav title="Settings" crumb={{ label: "Projects", to: "/" }} maxWidthClass="max-w-5xl" />
 
-      <main className="max-w-5xl mx-auto px-4 py-8">
-        {loading && <p className="text-muted">Loading settings...</p>}
-        {error && (
-          <p className="mb-4 rounded border border-danger bg-surface-elevated px-3 py-2 text-danger">
-            {error}
+      <main className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
+        <div className="mb-6">
+          <p className="as-eyebrow">Settings</p>
+          <h2 className="mt-1 text-2xl font-bold tracking-tight text-foreground">API keys</h2>
+          <p className="as-help mt-1">
+            Keys are stored in the project's secrets folder on this machine and never leave it.
+            Each vendor bills your own account per request.
           </p>
-        )}
+        </div>
+        {loading && <p className="text-muted">Loading settings...</p>}
+        {error && <p className="alert-danger mb-4">{error}</p>}
 
         {!loading && (
-          <div className="bg-surface-elevated rounded border border-default shadow overflow-hidden">
+          <div className="as-card overflow-hidden">
             <div className="divide-y divide-default">
               {SETTINGS_KEYS.map((settingsKey) => {
                 const keyStatus = keyByName.get(settingsKey.name) ?? {
@@ -160,9 +158,7 @@ export default function SettingsPage() {
                           <h2 className="font-semibold text-foreground">
                             {settingsKey.name}
                           </h2>
-                          <span
-                            className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium ${statusPill(keyStatus.set)}`}
-                          >
+                          <span className={keyStatus.set ? "pill-success" : "pill-muted"}>
                             {keyStatus.set ? "Set" : "Not set"}
                           </span>
                         </div>
@@ -183,7 +179,7 @@ export default function SettingsPage() {
                         <button
                           type="button"
                           onClick={() => startEditing(settingsKey.name)}
-                          className="px-3 py-2 rounded border border-default text-sm font-medium text-foreground hover:bg-surface"
+                          className="btn-secondary btn-sm"
                         >
                           Edit
                         </button>
@@ -191,7 +187,7 @@ export default function SettingsPage() {
                           type="button"
                           onClick={() => handleClear(settingsKey.name)}
                           disabled={clearing === settingsKey.name}
-                          className="px-3 py-2 rounded border border-default text-sm font-medium text-foreground hover:bg-surface disabled:opacity-50"
+                          className="btn-secondary btn-sm"
                         >
                           {clearing === settingsKey.name ? "Clearing..." : "Clear"}
                         </button>
@@ -199,7 +195,7 @@ export default function SettingsPage() {
                           type="button"
                           onClick={() => handleTest(settingsKey.name)}
                           disabled={testState.status === "loading"}
-                          className="inline-flex min-w-20 items-center justify-center gap-2 px-3 py-2 rounded bg-accent text-sm font-medium text-accent-foreground hover:brightness-95 disabled:opacity-70"
+                          className="btn-primary btn-sm min-w-20"
                         >
                           {testState.status === "loading" && (
                             <span
@@ -222,14 +218,14 @@ export default function SettingsPage() {
                           type="password"
                           value={draftValue}
                           onChange={(e) => setDraftValue(e.target.value)}
-                          className="min-w-0 flex-1 rounded border border-default bg-surface-elevated px-3 py-2 text-foreground focus:outline-none focus:ring-2 focus:ring-accent"
+                          className="field min-w-0 flex-1"
                           autoFocus
                         />
                         <button
                           type="button"
                           onClick={() => handleSave(settingsKey.name)}
                           disabled={saving === settingsKey.name}
-                          className="bg-accent text-accent-foreground px-4 py-2 rounded hover:brightness-95 disabled:opacity-50"
+                          className="btn-primary"
                         >
                           {saving === settingsKey.name ? "Saving..." : "Save"}
                         </button>
@@ -239,7 +235,7 @@ export default function SettingsPage() {
                             setEditing(null);
                             setDraftValue("");
                           }}
-                          className="bg-surface text-foreground border border-default px-4 py-2 rounded hover:brightness-95"
+                          className="btn-secondary"
                         >
                           Cancel
                         </button>
@@ -250,9 +246,7 @@ export default function SettingsPage() {
                       <p className="mt-3 text-sm font-medium text-success">OK</p>
                     )}
                     {testState.status === "error" && (
-                      <p className="mt-3 text-sm font-medium text-danger">
-                        X {testState.error}
-                      </p>
+                      <p className="alert-danger mt-3 font-medium">{testState.error}</p>
                     )}
                   </section>
                 );
@@ -309,26 +303,24 @@ function AvailableModelsPanel({
           type="button"
           onClick={onRefresh}
           disabled={loading}
-          className="px-3 py-2 rounded border border-default text-sm font-medium text-foreground hover:bg-surface disabled:opacity-50"
+          className="btn-secondary btn-sm"
         >
           {loading ? "Refreshing..." : "Refresh models"}
         </button>
       </div>
       {error && (
-        <p className="mb-3 rounded border border-danger bg-surface-elevated px-3 py-2 text-sm text-danger">
-          {error}
-        </p>
+        <p className="alert-danger mb-3">{error}</p>
       )}
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         {providers.map((provider) => (
           <article
             key={provider.slug}
             aria-label={`${provider.label} models`}
-            className="rounded border border-default bg-surface-elevated p-4"
+            className="as-card p-4"
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="font-semibold text-foreground">{provider.label}</h3>
-              <span className="text-xs text-muted">{ROLE_LABELS[provider.role]}</span>
+              <span className="pill-muted">{ROLE_LABELS[provider.role]}</span>
             </div>
             <p className="mt-1 text-xs text-muted">
               {provider.key_set

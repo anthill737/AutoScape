@@ -243,7 +243,7 @@ describe("ProjectListPage — with projects", () => {
     await userEvent.click(screen.getByText("7 Lucky Lane"));
 
     await waitFor(() => {
-      expect(screen.getByText("4,000 sqft")).toBeInTheDocument();
+      expect(screen.getByText(/4,000 sqft/)).toBeInTheDocument();
     });
   });
 });
@@ -258,8 +258,8 @@ describe("NewProjectPage", () => {
 
     expect(screen.getByText(/Site Photo/i)).toBeInTheDocument();
     expect(screen.getByText(/Address/i)).toBeInTheDocument();
-    expect(screen.getByText(/Lot Size/i)).toBeInTheDocument();
-    expect(screen.getByText(/House Sqft/i)).toBeInTheDocument();
+    expect(screen.getByText(/Lot size/i)).toBeInTheDocument();
+    expect(screen.getByText(/House size/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Save/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Cancel/i })).toBeInTheDocument();
   });
@@ -312,7 +312,7 @@ describe("NewProjectPage", () => {
     await userEvent.click(screen.getByRole("button", { name: /Save/i }));
 
     await waitFor(() => {
-      expect(screen.getByText("3,000 sqft")).toBeInTheDocument();
+      expect(screen.getByText(/3,000 sqft/)).toBeInTheDocument();
     });
 
     const [, createInit] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];

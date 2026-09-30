@@ -1,52 +1,98 @@
+/*
+  Theme tokens. Every colour in the app comes from these variables so the four themes
+  stay consistent. "sunken" is one step below the page surface (wells, inputs),
+  "elevated" one step above (cards). "accent-soft" is a translucent accent for chips,
+  highlights and focus rings.
+*/
 :root,
 [data-theme='light-default'] {
   color-scheme: light;
-  --color-surface: #f8fafc;
+  --color-surface: #f6f7fb;
+  --color-surface-sunken: #eef0f5;
   --color-surface-elevated: #ffffff;
-  --color-foreground: #111827;
+  --color-foreground: #0f172a;
   --color-muted: #64748b;
-  --color-border: #d6dce5;
+  --color-border: #e2e6ee;
+  --color-border-strong: #c9d0dc;
   --color-accent: #2563eb;
+  --color-accent-strong: #1d4ed8;
   --color-accent-foreground: #ffffff;
+  --color-accent-soft: rgba(37, 99, 235, 0.10);
   --color-danger: #b91c1c;
+  --color-danger-soft: rgba(185, 28, 28, 0.10);
   --color-success: #047857;
+  --color-success-soft: rgba(4, 120, 87, 0.12);
+  --color-warning: #b45309;
+  --color-warning-soft: rgba(180, 83, 9, 0.12);
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px -12px rgba(15, 23, 42, 0.12);
+  --shadow-pop: 0 12px 40px -12px rgba(15, 23, 42, 0.25);
 }
 
 [data-theme='dark-default'] {
   color-scheme: dark;
-  --color-surface: #09090b;
-  --color-surface-elevated: #18181b;
-  --color-foreground: #f4f4f5;
-  --color-muted: #a1a1aa;
-  --color-border: #27272a;
+  --color-surface: #0b0d12;
+  --color-surface-sunken: #07080c;
+  --color-surface-elevated: #14171f;
+  --color-foreground: #f1f5f9;
+  --color-muted: #94a3b8;
+  --color-border: #232836;
+  --color-border-strong: #333a4b;
   --color-accent: #60a5fa;
+  --color-accent-strong: #93c5fd;
   --color-accent-foreground: #07111f;
+  --color-accent-soft: rgba(96, 165, 250, 0.14);
   --color-danger: #f87171;
+  --color-danger-soft: rgba(248, 113, 113, 0.14);
   --color-success: #34d399;
+  --color-success-soft: rgba(52, 211, 153, 0.14);
+  --color-warning: #fbbf24;
+  --color-warning-soft: rgba(251, 191, 36, 0.14);
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03), 0 10px 30px -14px rgba(0, 0, 0, 0.7);
+  --shadow-pop: 0 18px 50px -14px rgba(0, 0, 0, 0.8);
 }
 
 [data-theme='dark-forest'] {
   color-scheme: dark;
-  --color-surface: #07110d;
+  --color-surface: #08110d;
+  --color-surface-sunken: #050b08;
   --color-surface-elevated: #101c17;
   --color-foreground: #ecfdf5;
   --color-muted: #9fb6aa;
-  --color-border: #22352c;
+  --color-border: #1f3128;
+  --color-border-strong: #2e4638;
   --color-accent: #34d399;
+  --color-accent-strong: #6ee7b7;
   --color-accent-foreground: #03140d;
+  --color-accent-soft: rgba(52, 211, 153, 0.14);
   --color-danger: #fb7185;
+  --color-danger-soft: rgba(251, 113, 133, 0.14);
   --color-success: #4ade80;
+  --color-success-soft: rgba(74, 222, 128, 0.14);
+  --color-warning: #fbbf24;
+  --color-warning-soft: rgba(251, 191, 36, 0.14);
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03), 0 10px 30px -14px rgba(0, 0, 0, 0.7);
+  --shadow-pop: 0 18px 50px -14px rgba(0, 0, 0, 0.8);
 }
 
 [data-theme='light-warm'] {
   color-scheme: light;
-  --color-surface: #fff8f1;
+  --color-surface: #fbf6ef;
+  --color-surface-sunken: #f3ebe0;
   --color-surface-elevated: #ffffff;
   --color-foreground: #231f20;
   --color-muted: #6f6258;
-  --color-border: #e7d7c7;
+  --color-border: #eadccb;
+  --color-border-strong: #d9c5ae;
   --color-accent: #9f3f22;
+  --color-accent-strong: #7f2f16;
   --color-accent-foreground: #ffffff;
+  --color-accent-soft: rgba(159, 63, 34, 0.10);
   --color-danger: #b42318;
+  --color-danger-soft: rgba(180, 35, 24, 0.10);
   --color-success: #28745a;
+  --color-success-soft: rgba(40, 116, 90, 0.12);
+  --color-warning: #a16207;
+  --color-warning-soft: rgba(161, 98, 7, 0.12);
+  --shadow-card: 0 1px 2px rgba(35, 31, 32, 0.04), 0 8px 24px -12px rgba(35, 31, 32, 0.14);
+  --shadow-pop: 0 12px 40px -12px rgba(35, 31, 32, 0.25);
 }

@@ -4,6 +4,11 @@ import { parseApiError } from "./errors";
 export interface ProjectListItem {
   id: number;
   address: string;
+  /** "exterior" | "interior"; absent on rows from older backends (treat as exterior). */
+  space_type?: string;
+  room_type?: string | null;
+  space_details?: Record<string, number> | null;
+  space_label?: string;
   site_photo_url: string | null;
   site_photo_thumb_url?: string | null;
   created_at: string;
@@ -19,6 +24,10 @@ export interface ProjectListItem {
 export interface ProjectDetail {
   id: number;
   address: string;
+  space_type?: string;
+  room_type?: string | null;
+  space_details?: Record<string, number> | null;
+  space_label?: string;
   lot_size_sqft: number | null;
   house_sqft: number | null;
   site_photo_url: string | null;

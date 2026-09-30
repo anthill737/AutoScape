@@ -4,6 +4,100 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    @apply bg-surface text-foreground;
+  }
+  ::selection {
+    background: var(--color-accent-soft);
+  }
+}
+
+/*
+  Shared building blocks. Keeping these here (rather than repeating long Tailwind
+  strings in every component) is what makes the pages read as one product.
+*/
+@layer components {
+  .as-card {
+    @apply rounded-2xl border border-default bg-surface-elevated shadow-card;
+  }
+  .as-well {
+    @apply rounded-xl border border-default bg-surface-sunken;
+  }
+  .as-eyebrow {
+    @apply text-[11px] font-semibold uppercase tracking-[0.14em] text-muted;
+  }
+  .as-title {
+    @apply text-lg font-semibold tracking-tight text-foreground;
+  }
+  .as-help {
+    @apply text-sm text-muted;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-accent text-accent-foreground shadow-sm hover:brightness-110;
+  }
+  .btn-secondary {
+    @apply btn border border-default bg-surface-elevated text-foreground hover:border-strong hover:bg-surface;
+  }
+  .btn-ghost {
+    @apply btn px-2 text-muted hover:bg-surface-sunken hover:text-foreground;
+  }
+  .btn-sm {
+    @apply px-3 py-1.5 text-xs;
+  }
+  .btn-lg {
+    @apply px-5 py-2.5 text-base;
+  }
+
+  .chip {
+    @apply inline-flex cursor-pointer select-none items-center gap-2 rounded-full border border-default bg-surface-elevated px-3 py-1.5 text-sm text-foreground transition hover:border-strong;
+  }
+  .chip-on {
+    @apply border-accent bg-accent-soft text-foreground;
+  }
+  .chip input {
+    @apply h-3.5 w-3.5 accent-[var(--color-accent)];
+  }
+
+  .pill {
+    @apply inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide;
+  }
+  .pill-accent {
+    @apply pill border-transparent bg-accent-soft text-accent;
+  }
+  .pill-muted {
+    @apply pill border-default text-muted;
+  }
+  .pill-success {
+    @apply pill border-transparent bg-success-soft text-success;
+  }
+  .pill-warning {
+    @apply pill border-transparent bg-warning-soft text-warning;
+  }
+
+  .field {
+    @apply w-full rounded-lg border border-default bg-surface-sunken px-3 py-2 text-sm text-foreground placeholder:text-muted transition focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-soft;
+  }
+  .field-label {
+    @apply mb-1 block text-xs font-medium text-foreground;
+  }
+
+  .alert-danger {
+    @apply rounded-lg border border-danger bg-danger-soft px-3 py-2 text-sm text-danger;
+  }
+  .alert-info {
+    @apply rounded-lg border border-accent bg-accent-soft px-3 py-2 text-sm text-foreground;
+  }
+}
+
 @keyframes asFadeUp {
   from {
     opacity: 0;
