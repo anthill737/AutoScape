@@ -8,6 +8,7 @@ backend/autoscape.db
 backend/autoscape.db-wal
 backend/autoscape.db-shm
 backend/.runtime-port
+backend/.runtime-frontend-url
 .env
 .env.local
 backend/.env.local
@@ -19,4 +20,21 @@ ${APPDATA}/
 autoscape-trace*.txt
 frontend/tests.err
 frontend/tests.out
+
+# local tooling and agent state
+.env.production
+.env.development
+.devteam/
+.devteam-project
+.worktrees/
+.playwright-mcp/
+.claude/settings.local.json
+.DS_Store
+/[Pp][0-9]*-[Tt][0-9]*
 .runtime/
+
+# local Python installs and stray runtime files
+/Python/
+backend/Python/
+/autoscape.db
+/[[]5173]

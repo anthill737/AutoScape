@@ -19,6 +19,10 @@ function formatDate(value: string | null) {
   });
 }
 
+function pluralize(count: number, singular: string): string {
+  return `${count} ${singular}${count === 1 ? "" : "s"}`;
+}
+
 function sortedProjects(projects: ProjectListItem[]) {
   return [...projects].sort((a, b) => {
     const bTime = new Date(activeAt(b)).getTime();
@@ -70,7 +74,11 @@ export default function HistoryView({ projects, onCreateProject }: HistoryViewPr
         const thumbnailUrl = project.site_photo_thumb_url ?? project.site_photo_url;
         const qualityTier = project.latest_quality_tier;
         const stage = stageOf(project);
-        const countLine = `${project.design_request_count} Design Requests · ${project.render_count} Renders · ${project.iteration_count} Iterations`;
+        const countLine = [
+          pluralize(project.design_request_count, "Design Request"),
+          pluralize(project.render_count, "Render"),
+          pluralize(project.iteration_count, "Iteration"),
+        ].join(" · ");
 
         return (
           <Link

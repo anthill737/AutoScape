@@ -101,6 +101,14 @@ Do not create `backend\.env.local` just to provide API keys; the `secrets\` file
 normal source of truth. `backend\.env.local` is only for deliberate local overrides and uses
 standard dotenv `NAME=value` lines if you need that advanced workflow.
 
+`FRONTEND_URL` (optional) overrides the frontend address that the backend reports at
+`http://127.0.0.1:<backend port>/`. It defaults to `http://127.0.0.1:5173` and only needs
+setting if you run the frontend somewhere else:
+
+```powershell
+$env:FRONTEND_URL = "http://127.0.0.1:5174"
+```
+
 Missing keys cause a clear error in the UI when that feature is used; the server still starts
 without them. The absence of `backend\.env.local` is not an error when the corresponding key
 file exists in `secrets\`.

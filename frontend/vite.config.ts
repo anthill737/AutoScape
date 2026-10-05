@@ -36,6 +36,15 @@ const backendProxy = {
 export default defineConfig({
   plugins: [react()],
   server: {
+    // P18-T2 root cause: default host "localhost" bound IPv6 [::1]:5173 only (no IPv4 listener); pin 127.0.0.1.
+    // Bind IPv4 loopback explicitly. Vite's default `localhost` host resolves to
+    // whichever address the OS returns first, which on Windows was binding only
+    // IPv6 [::1]:5173 with no 127.0.0.1 listener. The launcher opens/probes
+    // http://localhost:5173 and the backend binds 127.0.0.1, so on machines where
+    // localhost resolves to IPv4 (IPv6 loopback disabled) the app served nothing.
+    // 127.0.0.1 always exists, matches the backend and the proxy target, and stays
+    // reachable via http://localhost:5173 and http://127.0.0.1:5173.
+    host: "127.0.0.1",
     port: 5173,
     proxy: backendProxy,
   },
