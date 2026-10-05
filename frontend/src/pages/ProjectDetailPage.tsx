@@ -180,6 +180,33 @@ function formatFeatureCategories(categories: string[]): string {
   return categories.length > 0 ? categories.join(", ") : "No feature categories";
 }
 
+function getIterationComposedPrompt(dr: DesignRequestOut, basePrompt: string): string {
+  const parentPrompt = dr.composed_prompt.trim();
+  if (!parentPrompt) return basePrompt;
+  const leadingDelta = parentPrompt.replace(/^[\u2013\u2014-]\s*/, "");
+  return leadingDelta !== parentPrompt ? `${basePrompt} ${leadingDelta}` : parentPrompt;
+}
+
+function formatProviderError(message: string, status?: number): string {
+  const normalized = message.toLowerCase();
+  if (status === 429 || normalized.includes("quota") || normalized.includes("resource_exhausted")) {
+    return "Image provider is busy right now. Please try again in a moment.";
+  }
+  if (
+    status === 503 ||
+    normalized.includes("503") ||
+    normalized.includes("unavailable") ||
+    normalized.includes("overloaded") ||
+    normalized.includes("servererror")
+  ) {
+    return "Image provider is temporarily unavailable. Please try again in a moment.";
+  }
+  if (normalized.includes("image provider failed")) {
+    return "Image provider could not generate Renders. Please try again.";
+  }
+  return message;
+}
+
 function getHeroLabel(context: ActiveRenderContext): string {
   return [
     `Design Request #${context.requestNumber}`,
@@ -484,9 +511,15 @@ export default function ProjectDetailPage() {
     setStyle(dr.style);
     setQualityTier(dr.quality_tier);
     setIterationParentRenderId(render.id);
-    // The parent's prompt is kept verbatim; treat it as user-owned text.
+    // The parent's prompt is kept (a bare delta fragment gets its base prompt back);
+    // treat it as user-owned text.
     setPromptIsCustom(true);
-    setComposedPrompt(dr.composed_prompt);
+    setComposedPrompt(
+      getIterationComposedPrompt(
+        dr,
+        seedPromptFor(space, roomType, dr.feature_categories, dr.style, dr.quality_tier),
+      ),
+    );
     setSubmitError(null);
     setSubmitWarning(null);
     pendingFormFocusRef.current = true;
@@ -559,8 +592,13 @@ export default function ProjectDetailPage() {
       }, 0);
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : "Unknown error";
-      if (e instanceof ApiError && e.status === 429) {
-        setSubmitWarning(message);
+      if (e instanceof ApiError) {
+        console.error("Design Request failed", e);
+        if (e.status === 429) {
+          setSubmitWarning(message);
+        } else {
+          setSubmitError(formatProviderError(message, e.status));
+        }
       } else {
         setSubmitError(message);
       }

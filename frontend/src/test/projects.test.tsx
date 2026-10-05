@@ -1,4 +1,5 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -31,6 +32,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   fetchRetryOptions.delayMs = defaultRetryDelay;
 });
@@ -41,10 +43,11 @@ afterEach(() => {
 
 describe("ProjectListPage — empty state", () => {
   it("shows empty-state message and New Project button when no projects", async () => {
-    (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      ok: true,
-      json: async () => [],
-    });
+    (fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [],
+      });
 
     renderAt("/");
 
@@ -72,12 +75,73 @@ describe("ProjectListPage — empty state", () => {
 
     renderAt("/");
 
+    expect(screen.getByText("Starting up…")).toBeInTheDocument();
+
     await waitFor(() => {
-      expect(
-        screen.getByText(/FileNotFoundError: \[Errno 2\] No such file or directory/i),
-      ).toBeInTheDocument();
+      expect(screen.getByText("Could not load Projects")).toBeInTheDocument();
     });
+    expect(
+      screen.getByText(/FileNotFoundError: \[Errno 2\] No such file or directory/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
     expect(screen.queryByText(/Failed to fetch projects: 500/i)).not.toBeInTheDocument();
+    expect((fetch as ReturnType<typeof vi.fn>).mock.calls.length).toBe(
+      fetchRetryOptions.retries + 1,
+    );
+  });
+
+  it("keeps Starting up visible during StrictMode retry startup", async () => {
+    vi.useFakeTimers();
+    (fetch as ReturnType<typeof vi.fn>).mockRejectedValue(new TypeError("Failed to fetch"));
+
+    render(
+      <StrictMode>
+        <ThemeProvider>
+          <MemoryRouter initialEntries={["/"]}>
+            <Routes>
+              <Route path="/" element={<ProjectListPage />} />
+            </Routes>
+          </MemoryRouter>
+        </ThemeProvider>
+      </StrictMode>,
+    );
+
+    expect(screen.getByText("Starting up…")).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+
+    expect(screen.getByText("Starting up…")).toBeInTheDocument();
+    expect(screen.queryByText(/No projects yet/i)).not.toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    vi.useRealTimers();
+
+    await waitFor(() => {
+      expect(screen.getByText("Could not load Projects")).toBeInTheDocument();
+    });
+  });
+
+  it("shows startup status, then a readable Retry error when backend is stopped", async () => {
+    vi.useFakeTimers();
+    (fetch as ReturnType<typeof vi.fn>).mockRejectedValue(new TypeError("Failed to fetch"));
+
+    renderAt("/");
+
+    expect(screen.getByText("Starting up…")).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9000);
+    });
+    vi.useRealTimers();
+
+    await waitFor(() => {
+      expect(screen.getByText("Could not load Projects")).toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.queryByText(/Request failed: 500/i)).not.toBeInTheDocument();
+    vi.useRealTimers();
   });
 });
 
@@ -87,9 +151,10 @@ describe("ProjectListPage — empty state", () => {
 
 describe("ProjectListPage — with projects", () => {
   it("renders project cards with all history metadata from the API", async () => {
-    (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      ok: true,
-      json: async () => [
+    (fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
         {
           id: 1,
           address: "123 Main St",
@@ -118,8 +183,8 @@ describe("ProjectListPage — with projects", () => {
           has_build_sheet: true,
           latest_quality_tier: "Premium",
         },
-      ],
-    });
+        ],
+      });
 
     renderAt("/");
 
@@ -127,6 +192,7 @@ describe("ProjectListPage — with projects", () => {
       expect(screen.getByText("123 Main St")).toBeInTheDocument();
     });
     expect(screen.getByText("456 Oak Ave")).toBeInTheDocument();
+    expect(screen.getByText("0 Design Requests · 0 Renders · 0 Iterations")).toBeInTheDocument();
     expect(
       screen.getByText("3 Design Requests · 9 Renders · 2 Iterations"),
     ).toBeInTheDocument();
@@ -141,9 +207,10 @@ describe("ProjectListPage — with projects", () => {
   });
 
   it("sorts cards by latest design request date, then created date", async () => {
-    (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      ok: true,
-      json: async () => [
+    (fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
         {
           id: 1,
           address: "Created Newer",
@@ -186,8 +253,8 @@ describe("ProjectListPage — with projects", () => {
           has_build_sheet: false,
           latest_quality_tier: null,
         },
-      ],
-    });
+        ],
+      });
 
     renderAt("/");
 
@@ -245,6 +312,127 @@ describe("ProjectListPage — with projects", () => {
     await waitFor(() => {
       expect(screen.getByText(/4,000 sqft/)).toBeInTheDocument();
     });
+  });
+});
+
+describe("ProjectDetailPage iteration flow", () => {
+  it("pre-fills an iteration delta fragment with the parent base prompt", async () => {
+    const user = userEvent.setup();
+    const project = {
+      id: 1,
+      address: "123 Main St",
+      lot_size_sqft: 5000,
+      house_sqft: 2000,
+      site_photo_url: "/images/1/site_photo.jpg",
+      created_at: "2024-06-01T00:00:00Z",
+      design_requests: [
+        {
+          id: 11,
+          project_id: 1,
+          parent_render_id: null,
+          image_provider: "gpt_image",
+          feature_categories: ["Deck"],
+          style: "Modern",
+          quality_tier: "Budget",
+          composed_prompt: "\u2014 now in cedar with built-in bench seating",
+          created_at: "2024-06-02T00:00:00Z",
+          renders: [
+            {
+              id: 101,
+              design_request_id: 11,
+              image_path: "render-101.jpg",
+              image_url: "/renders/101",
+              is_chosen: true,
+              created_at: "2024-06-02T00:00:00Z",
+            },
+          ],
+        },
+      ],
+    };
+
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/projects/1") return Promise.resolve({ ok: true, json: async () => project });
+      if (url.includes("/dimension-defaults")) return Promise.resolve({ ok: true, json: async () => ({}) });
+      if (url.includes("/build-sheet")) return Promise.resolve({ ok: false, status: 404, json: async () => ({ detail: "Missing" }) });
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+
+    renderAt("/projects/1/renders/101");
+
+    await waitFor(() => screen.getAllByText(/Design Request #1/));
+    await user.click(screen.getByRole("button", { name: "Iterate from this Render" }));
+
+    const value = (screen.getByLabelText(/Prompt/) as HTMLTextAreaElement).value;
+    expect(value).toContain("Design a budget modern outdoor space featuring Deck");
+    expect(value).toContain("now in cedar with built-in bench seating");
+    expect(value).not.toContain("\u2014");
+  });
+
+  it("shows a human provider error in a styled alert", async () => {
+    const user = userEvent.setup();
+    const project = {
+      id: 1,
+      address: "123 Main St",
+      lot_size_sqft: 5000,
+      house_sqft: 2000,
+      site_photo_url: "/images/1/site_photo.jpg",
+      created_at: "2024-06-01T00:00:00Z",
+      design_requests: [
+        {
+          id: 11,
+          project_id: 1,
+          parent_render_id: null,
+          image_provider: "gpt_image",
+          feature_categories: ["Deck"],
+          style: "Modern",
+          quality_tier: "Budget",
+          composed_prompt: "Keep the current deck shape.",
+          created_at: "2024-06-02T00:00:00Z",
+          renders: [
+            {
+              id: 101,
+              design_request_id: 11,
+              image_path: "render-101.jpg",
+              image_url: "/renders/101",
+              is_chosen: true,
+              created_at: "2024-06-02T00:00:00Z",
+            },
+          ],
+        },
+      ],
+    };
+
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/projects/1") return Promise.resolve({ ok: true, json: async () => project });
+      if (url.includes("/dimension-defaults")) return Promise.resolve({ ok: true, json: async () => ({}) });
+      if (url.includes("/build-sheet")) return Promise.resolve({ ok: false, status: 404, json: async () => ({ detail: "Missing" }) });
+      if (url === "/api/projects/1/design-requests" && init?.method === "POST") {
+        return Promise.resolve({
+          ok: false,
+          status: 503,
+          json: async () => ({
+            detail: "Image provider failed: ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'status': 'UNAVAILABLE'}}",
+          }),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+
+    renderAt("/projects/1/renders/101");
+
+    await waitFor(() => screen.getAllByText(/Design Request #1/));
+    await user.click(screen.getByRole("button", { name: "Iterate from this Render" }));
+    await user.click(screen.getByRole("button", { name: "Generate Renders" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Image provider is temporarily unavailable. Please try again in a moment."),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/ServerError/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/503/i)).not.toBeInTheDocument();
   });
 });
 

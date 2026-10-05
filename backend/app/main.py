@@ -136,6 +136,36 @@ app = FastAPI(title="AutoScape API", version="0.1.0", lifespan=lifespan)
 app.include_router(settings_router)
 
 
+# Optional: a launcher may write the frontend URL it verified here, so the root
+# pointer stays correct when Vite bumps off port 5173.
+_runtime_frontend_url_file = _backend_dir / ".runtime-frontend-url"
+
+# 127.0.0.1, not localhost: the dev server binds IPv4 and `localhost` can
+# resolve to ::1 first on Windows, which would point the user at nothing.
+DEFAULT_FRONTEND_URL = "http://127.0.0.1:5173"
+
+
+def resolve_frontend_url() -> str:
+    """Explicit FRONTEND_URL wins, then the launcher's verified URL, then the default."""
+    override = os.getenv("FRONTEND_URL")
+    if override:
+        return override
+    try:
+        verified = _runtime_frontend_url_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        verified = ""
+    return verified or DEFAULT_FRONTEND_URL
+
+
+@app.get("/")
+async def root() -> dict[str, str]:
+    return {
+        "app": "AutoScape",
+        "frontend_url": resolve_frontend_url(),
+        "health_check": "/api/health",
+    }
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     trace_id = uuid.uuid4().hex[:8]
@@ -253,6 +283,7 @@ def _design_request_out(dr: DesignRequest) -> DesignRequestOut:
     )
 
 
+@app.get("/api/health")
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -412,9 +443,7 @@ def list_projects(
                 ),
                 design_request_count=len(design_requests),
                 render_count=len(renders),
-                iteration_count=sum(
-                    1 for dr in design_requests if dr.parent_render_id is not None
-                ),
+                iteration_count=sum(1 for dr in design_requests if dr.parent_render_id is not None),
                 has_chosen_render=any(render.is_chosen for render in renders),
                 has_build_sheet=any(render.build_sheet is not None for render in renders),
                 latest_quality_tier=(

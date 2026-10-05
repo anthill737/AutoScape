@@ -8,14 +8,29 @@ export default function ProjectListPage() {
   const [projects, setProjects] = useState<ProjectListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [retryNonce, setRetryNonce] = useState(0);
   const navigate = useNavigate();
 
   useEffect(() => {
+    // listProjects retries connection errors and 5xx while the backend is still
+    // starting, so "Starting up…" stays up until it either answers or gives up.
+    let active = true;
+    setLoading(true);
+    setError(null);
     listProjects()
-      .then(setProjects)
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, []);
+      .then((loadedProjects) => {
+        if (active) setProjects(loadedProjects);
+      })
+      .catch((e: Error) => {
+        if (active) setError(e.message);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [retryNonce]);
 
   return (
     <div className="min-h-screen bg-surface text-foreground">
@@ -45,10 +60,27 @@ export default function ProjectListPage() {
           )}
         </div>
 
-        {loading && <p className="text-muted">Loading…</p>}
+        {loading && (
+          <div className="as-card p-6">
+            <p className="text-base font-semibold text-foreground">Starting up…</p>
+            <p className="as-help mt-2">
+              AutoScape is waiting for the backend before loading Projects.
+            </p>
+          </div>
+        )}
 
         {!loading && error && (
-          <p className="alert-danger">Error loading projects: {error}</p>
+          <div className="alert-danger">
+            <p className="font-semibold">Could not load Projects</p>
+            <p className="mt-1">{error}</p>
+            <button
+              type="button"
+              onClick={() => setRetryNonce((value) => value + 1)}
+              className="btn-primary btn-sm mt-3"
+            >
+              Retry
+            </button>
+          </div>
         )}
 
         {!loading && !error && (

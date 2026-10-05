@@ -6,6 +6,7 @@ import { describe, it, expect } from "vitest";
 import * as nodefs from "fs";
 import * as nodeos from "os";
 import * as nodepath from "path";
+import * as nodeurl from "url";
 
 // Dynamic import avoids the TypeScript compiler resolving Node.js types
 // through tsconfig.json (which targets the browser and lacks @types/node).
@@ -50,7 +51,13 @@ describe("readBackendPort (vite.config proxy-port resolution)", () => {
   });
 
   it("vite dev and preview proxies include generated image URLs", () => {
-    const configPath = nodepath.resolve("vite.config.ts");
+    // Resolve from this file, not process.cwd(): the suite must pass whether it
+    // is launched from frontend/ or from the repo root with --root frontend.
+    const frontendDir = nodepath.resolve(
+      nodepath.dirname(nodeurl.fileURLToPath(import.meta.url)),
+      "../..",
+    );
+    const configPath = nodepath.join(frontendDir, "vite.config.ts");
     const configSource = nodefs.readFileSync(configPath, "utf8");
 
     expect(configSource).toContain("const backendProxy");
